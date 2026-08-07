@@ -24,3 +24,9 @@ CHECK_PATH_FILTERS = {
         "src/workerd/util",
     ],
 }
+
+HEADER_ONLY_CHECKS = [
+    # Enabling misc-include-cleaner on headers means having to clean up much
+    # fewer includes while still getting rid of superfluous transitive includes.
+    "misc-include-cleaner",
+]
