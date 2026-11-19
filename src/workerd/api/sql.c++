@@ -312,6 +312,12 @@ jsg::JsValue SqlStorage::Cursor::one(jsg::Lock& js) {
   return result;
 }
 
+void SqlStorage::Cursor::close() {
+  KJ_IF_SOME(s, state) {
+    endQuery(*s);
+  }
+}
+
 jsg::Ref<SqlStorage::Cursor::RowIterator> SqlStorage::Cursor::rows(jsg::Lock& js) {
   return js.alloc<RowIterator>(JSG_THIS);
 }
@@ -408,8 +414,7 @@ kj::Maybe<v8::LocalVector<v8::Value>> SqlStorage::Cursor::iteratorImpl(
   // GC'ed, which might prevent the cache from being effective in the meantime.
   //
   // Unfortunately, this does not help with the case where the application stops iterating with
-  // results still available from the cursor. There's not much we can do about that case since
-  // there's no way to know if the app might come back and try to use the cursor again later.
+  // results still available from the cursor. Such applications need to call close().
   query.nextRow();
   if (query.isDone()) {
     obj->endQuery(state);
