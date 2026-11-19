@@ -66,6 +66,7 @@ use kj::http::HeadersRef;
 use kj::http::Method;
 use kj::http::Service;
 use kj::http::ServiceResponse;
+use kj::http::ServiceResult;
 use kj::io::AsyncInputStream;
 use kj::io::AsyncIoStream;
 use kj_rs::KjMaybe;
@@ -852,10 +853,10 @@ async fn pump_body(mut body: Pin<&mut AsyncInputStream>, sink: BodySink, abort: 
     }
 }
 
-#[async_trait::async_trait(?Send)]
-impl Service for Client<'_> {
-    async fn request<'a>(
-        &'a mut self,
+impl Client<'_> {
+    /// The request [`Service::request`] makes, failing with a [`KjError`].
+    async fn exchange<'a>(
+        &'a self,
         method: Method,
         url: &'a [u8],
         headers: HeadersRef<'a>,
@@ -897,6 +898,22 @@ impl Service for Client<'_> {
             Either::Right(((), exchange)) => exchange.await,
         }
     }
+}
+
+#[async_trait::async_trait(?Send)]
+impl Service for Client<'_> {
+    async fn request<'a>(
+        &'a mut self,
+        method: Method,
+        url: &'a [u8],
+        headers: HeadersRef<'a>,
+        request_body: Pin<&'a mut AsyncInputStream>,
+        response: ServiceResponse<'a>,
+    ) -> ServiceResult {
+        Ok(self
+            .exchange(method, url, headers, request_body, response)
+            .await?)
+    }
 
     fn connect<'a, 'b>(
         &'a mut self,
@@ -905,7 +922,7 @@ impl Service for Client<'_> {
         connection: Pin<&'a mut AsyncIoStream>,
         response: ConnectResponse<'a>,
         settings: ConnectSettings<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>
+    ) -> Pin<Box<dyn Future<Output = ServiceResult> + 'b>>
     where
         'a: 'b,
         Self: 'b,
@@ -925,7 +942,8 @@ impl Service for Client<'_> {
             }
             _ => None,
         };
-        Box::pin(self.connect_with(host, headers, connection, response, use_tls, upgrade))
+        let connection = self.connect_with(host, headers, connection, response, use_tls, upgrade);
+        Box::pin(async move { Ok(connection.await?) })
     }
 }
 
