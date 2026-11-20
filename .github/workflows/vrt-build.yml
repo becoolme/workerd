@@ -75,9 +75,13 @@ jobs:
       # them is the difference between a finished build and "No space left on device".
       - name: Free disk space
         run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
-            /usr/local/lib/node_modules /opt/az /usr/lib/heroku
+          # Keep /usr/local/lib/android/sdk's platforms and build-tools: Bazel's
+          # rules_android repository rule fails the analysis if ANDROID_HOME points at an SDK
+          # without them, even though workerd itself does not build Android targets.
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules /opt/az /usr/lib/heroku \
+            /usr/local/lib/android/sdk/system-images /usr/local/lib/android/sdk/ndk \
+            /usr/local/lib/android/sdk/emulator /usr/local/lib/android/sdk/sources
           df -h /
 
       - name: Install Bazelisk
