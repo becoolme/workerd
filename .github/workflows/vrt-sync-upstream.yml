@@ -123,12 +123,27 @@ jobs:
           if pr=$(gh pr list --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
             gh pr comment "$pr" --body "Re-ran the sync; branch updated to $(git rev-parse HEAD)."
             echo "number=$pr" >> "$GITHUB_OUTPUT"
-          else
-            url=$(gh pr create --base vrt --head "$BRANCH" \
+          elif url=$(gh pr create --base vrt --head "$BRANCH" \
               --title "chore: sync workerd upstream $(git rev-parse --short=12 "$UPSTREAM_SHA")" \
-              --body "$body" --label sync)
+              --body "$body" --label sync 2>/tmp/pr-error.txt); then
             gh pr comment "$url" --body "Kicking off \`VRT build\` for the merge commit."
             echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+          else
+            # GITHUB_TOKEN can only open PRs when the organization allows it. The branch is
+            # pushed either way, so a human can open the PR with one click.
+            echo "::warning::Could not open the sync PR automatically: $(cat /tmp/pr-error.txt)"
+            {
+              echo "### VRT upstream sync: PR not opened automatically"
+              echo
+              echo "The branch \`${BRANCH}\` is pushed. Open the PR:"
+              echo
+              echo "https://github.com/${GITHUB_REPOSITORY}/compare/vrt...${BRANCH}?expand=1"
+              echo
+              echo "Error: \`$(cat /tmp/pr-error.txt)\`"
+              echo
+              echo "To automate it, allow GitHub Actions to create pull requests in the org, or"
+              echo "add a \`VRT_SYNC_TOKEN\` PAT secret and use it for GH_TOKEN in this workflow."
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       # A PR opened with GITHUB_TOKEN does not trigger pull_request workflows (GitHub's
@@ -138,7 +153,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.merge.outputs.branch }}
-        run: gh workflow run vrt-build.yml --ref "$BRANCH"
+        run: |
+          # workflow_dispatch is exempt from GitHub's push/PR recursion guard, so the bot can
+          # start the build even though its PR did not fire a pull_request event.
+          gh workflow run vrt-build.yml --ref "$BRANCH" || {
+            echo "::warning::Could not dispatch VRT build; run it from the Actions tab."
+          }
 
       - name: Prepare conflict branch
         if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'false'
