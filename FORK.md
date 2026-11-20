@@ -76,12 +76,15 @@ After a sync merges, rebuild and re-tag; see below.
 A release contains, per architecture:
 
 ```
-workerd-linux-x64.gz
-workerd-linux-x64.gz.sha256
-workerd-linux-arm64.gz
-workerd-linux-arm64.gz.sha256
-manifest.json     # tag, source commit, upstream commit/tag, build time, per-asset sha256
+workerd-linux-x64.gz            workerd-linux-x64.gz.sha256
+workerd-linux-arm64.gz          workerd-linux-arm64.gz.sha256
+workerd.capnp                   workerd.capnp.sha256
+manifest.json                   # tag, commits, binaries{arch: ELF sha256}, assets{file: sha256}
 ```
+
+`manifest.binaries` is the digest of the decompressed ELF, which is what consumers pin;
+`assets` covers the files actually uploaded. The schema asset lets a consumer check generated
+configs against the exact runtime version it pinned.
 
 `.vrt/upstream` in the tree records the `cloudflare/workerd` commit the current branch was
 last synced to; the sync workflow writes it into the merge commit, and the release job resolves
