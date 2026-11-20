@@ -68,6 +68,8 @@ After a sync merges, rebuild and re-tag; see below.
 - **Pull request** — release-config compile, `workerd --version`, and a serve smoke test.
   Bazel's disk cache is restored from the Actions cache, so a patch-only rebuild is minutes,
   a cold build an hour.
+- **Push to `vrt`** — builds the merge commit (no release). This is the check that matters for
+  a sync PR that was merged without waiting, and it catches a bad merge immediately.
 - **`workflow_dispatch`** — same build; set `release_tag` to publish a release.
 - **Tag `vrt-*`** — builds and publishes that tag's release.
 

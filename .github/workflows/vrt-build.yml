@@ -28,6 +28,7 @@ on:
         required: false
         type: string
   push:
+    branches: [vrt]
     tags:
       - 'vrt-*'
 
@@ -197,7 +198,8 @@ jobs:
   release:
     name: release
     needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    # A tag push releases; a branch push only validates the merge commit.
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -217,7 +219,7 @@ jobs:
       - name: Write manifest
         run: |
           set -euo pipefail
-          tag="${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}"
+          tag="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}"
           commit="$(git rev-parse HEAD)"
           {
             echo '{'
@@ -245,10 +247,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}"
+          tag="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
-          elif [ "${{ github.event_name }}" = "push" ]; then
+          elif [ "${{ startsWith(github.ref, 'refs/tags/') }}" = "true" ]; then
             gh release create "$tag" dist/* \
               --title "$tag" \
               --notes "VRT workerd build from ${GITHUB_SHA}. See manifest.json for per-asset sha256."
