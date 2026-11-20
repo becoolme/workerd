@@ -46,6 +46,11 @@ use crate::worker::WorkerService;
 pub struct WorkerLoaderNamespace {
     server: Weak<Server>,
     name: String,
+    /// The cap on live workers, from `workerLoader.maxWorkers`; 0 means unbounded.
+    max_workers: u32,
+    /// The workers the namespace owns a slot for: every stub it has created and not yet
+    /// released. `load()` rejects a new worker once this reaches `max_workers`.
+    live: Cell<usize>,
     /// The named workers. A worker that aborts its isolate leaves the map, so the next load under
     /// its name compiles afresh. Unnamed workers are owned by their JS handles alone.
     isolates: RefCell<HashMap<String, Rc<WorkerStub>>>,
@@ -54,10 +59,12 @@ pub struct WorkerLoaderNamespace {
 impl WorkerLoaderNamespace {
     /// `name` is the binding's name, for error logging.
     #[must_use]
-    pub fn new(server: Weak<Server>, name: String) -> Rc<Self> {
+    pub fn new(server: Weak<Server>, name: String, max_workers: u32) -> Rc<Self> {
         Rc::new(Self {
             server,
             name,
+            max_workers,
+            live: Cell::new(0),
             isolates: RefCell::new(HashMap::new()),
         })
     }
@@ -81,6 +88,7 @@ impl WorkerLoaderNamespace {
                 if let Some(stub) = self.isolates.borrow().get(name) {
                     return Ok(Rc::clone(stub));
                 }
+                self.check_quota(name)?;
                 let namespace = Rc::downgrade(self);
                 let key = name.to_owned();
                 let on_abort: Box<dyn Fn()> = Box::new(move || {
@@ -94,6 +102,7 @@ impl WorkerLoaderNamespace {
                     format!("{}:{name}", self.name),
                     source,
                     Some(on_abort),
+                    self.quota_release(),
                     limits,
                 );
                 self.isolates
@@ -101,14 +110,18 @@ impl WorkerLoaderNamespace {
                     .insert(name.to_owned(), Rc::clone(&stub));
                 stub
             }
-            None => WorkerStub::new(
-                Rc::clone(factory),
-                Weak::clone(&self.server),
-                format!("{}:dynamic:{:032x}", self.name, rand::random::<u128>()),
-                source,
-                None,
-                limits,
-            ),
+            None => {
+                self.check_quota("load()")?;
+                WorkerStub::new(
+                    Rc::clone(factory),
+                    Weak::clone(&self.server),
+                    format!("{}:dynamic:{:032x}", self.name, rand::random::<u128>()),
+                    source,
+                    None,
+                    self.quota_release(),
+                    limits,
+                )
+            }
         };
 
         // Startup runs whether or not anything calls the worker, and the task holds the stub
@@ -130,6 +143,30 @@ impl WorkerLoaderNamespace {
             stub.unlink();
         }
     }
+
+    /// Takes a quota slot for one more live worker, or fails the load when `max_workers` live
+    /// workers are already held. `what` names the load in the error (`get()` passes the name).
+    fn check_quota(&self, what: &str) -> Result<()> {
+        if self.max_workers != 0 && self.live.get() >= self.max_workers as usize {
+            return Err(kj::failed!(
+                "worker loader '{}' cannot load {what}: the limit of {} live workers is reached",
+                self.name,
+                self.max_workers,
+            ));
+        }
+        self.live.set(self.live.get() + 1);
+        Ok(())
+    }
+
+    /// The release half of one quota slot: called once when a stub dies, however it dies.
+    fn quota_release(self: &Rc<Self>) -> Box<dyn FnOnce()> {
+        let namespace = Rc::downgrade(self);
+        Box::new(move || {
+            if let Some(namespace) = namespace.upgrade() {
+                namespace.live.set(namespace.live.get().saturating_sub(1));
+            }
+        })
+    }
 }
 
 /// A loaded dynamic worker. The runtime's `WorkerStubChannel`.
@@ -138,19 +175,23 @@ pub struct WorkerStub {
     /// result stays readable here (`Shared::peek`).
     startup: Shared<LocalBoxFuture<'static, Result<Rc<WorkerService>>>>,
     unlinked: Cell<bool>,
+    /// Returns the stub's quota slot to its namespace, once, whichever way the stub dies.
+    on_release: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 
 impl WorkerStub {
     /// `on_abort` runs (once) when the worker aborts its isolate; a named stub uses it to leave
-    /// its namespace. The stub's startup compiles the worker from its source (which the factory
-    /// fetches) and links it. `limits` is the loading worker's `limits` group, the ceiling the
-    /// source's `code.limits` may tighten.
+    /// its namespace. `on_release` returns the stub's loader quota slot; it runs once, on
+    /// `unlink()` or drop. The stub's startup compiles the worker from its source (which the
+    /// factory fetches) and links it. `limits` is the loading worker's `limits` group, the
+    /// ceiling the source's `code.limits` may tighten.
     fn new(
         factory: Rc<Factory>,
         server: Weak<Server>,
         isolate_name: String,
         source: KjOwn<DynamicSource>,
         on_abort: Option<Box<dyn Fn()>>,
+        on_release: Box<dyn FnOnce()>,
         limits: ffi::WorkerLimits,
     ) -> Rc<Self> {
         let fired = Cell::new(false);
@@ -175,7 +216,15 @@ impl WorkerStub {
         Rc::new(Self {
             startup,
             unlinked: Cell::new(false),
+            on_release: RefCell::new(Some(on_release)),
         })
+    }
+
+    /// Returns the stub's quota slot; a no-op after the first call.
+    fn release(&self) {
+        if let Some(on_release) = self.on_release.borrow_mut().take() {
+            on_release();
+        }
     }
 
     /// Resolves once the worker has started; fails with the startup error.
@@ -197,6 +246,7 @@ impl WorkerStub {
             service.unlink();
         }
         self.unlinked.set(true);
+        self.release();
     }
 }
 
@@ -206,6 +256,7 @@ impl Drop for WorkerStub {
     /// `ctx.restore()`), so its isolate cannot be entered now. A stub already unlinked has
     /// nothing left to do.
     fn drop(&mut self) {
+        self.release();
         if self.unlinked.get() {
             return;
         }

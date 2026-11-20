@@ -1797,10 +1797,18 @@ impl Server {
         let mut loaders = self.worker_loaders.borrow_mut();
         if let Some(id) = &designator.id {
             return Rc::clone(loaders.by_id.entry(id.clone()).or_insert_with(|| {
-                WorkerLoaderNamespace::new(Rc::downgrade(self), designator.name.clone())
+                WorkerLoaderNamespace::new(
+                    Rc::downgrade(self),
+                    designator.name.clone(),
+                    designator.max_workers,
+                )
             }));
         }
-        let loader = WorkerLoaderNamespace::new(Rc::downgrade(self), designator.name.clone());
+        let loader = WorkerLoaderNamespace::new(
+            Rc::downgrade(self),
+            designator.name.clone(),
+            designator.max_workers,
+        );
         loaders.anonymous.push(Rc::clone(&loader));
         loader
     }

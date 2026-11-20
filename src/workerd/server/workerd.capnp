@@ -888,6 +888,14 @@ struct Worker {
         # from it, they'll end up sharing the same loaded Worker.
         #
         # (If omitted, the binding will not share a cache with any other binding.)
+
+        maxWorkers @29 :UInt32;
+        # Optional: the maximum number of dynamic workers this loader may have live at once —
+        # loading, loaded, or still serving through a held entrypoint, named or not. Once the
+        # bound is reached, `get()` and `load()` reject until a worker's handles are released.
+        #
+        # (If omitted or zero, only the process's own resources bound the loader. Bindings that
+        # share a loader through `id` use the bound of the first binding that created it.)
       }
 
       workerdDebugPort @28 :Void;
