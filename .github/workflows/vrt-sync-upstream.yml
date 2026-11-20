@@ -1,0 +1,217 @@
+name: VRT sync upstream
+
+# Keeps the fork in step with cloudflare/workerd without letting upstream rewrites touch the
+# patched branch by surprise:
+#
+#   main  <- pure mirror of cloudflare/workerd:main (no local commits, force-updated)
+#   vrt   <- our patches, only ever changed through pull requests
+#
+# Each run:
+#   1. force-updates `main` to upstream's `main`;
+#   2. if `vrt` already contains upstream, stops;
+#   3. otherwise merges upstream into `sync/upstream-<date>`:
+#        - clean merge -> push the branch, open a PR into `vrt`, dispatch the build;
+#        - conflict    -> push a branch holding upstream's tree so GitHub shows the conflicting
+#                         PR, comment the conflicted files, and label it for a maintainer.
+
+on:
+  schedule:
+    # Upstream releases several times a day; weekly is enough to keep the diff small without
+    # spending runner minutes on churn. Run it manually after an important upstream fix.
+    - cron: '0 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: vrt-sync-upstream
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout vrt
+        uses: actions/checkout@v4
+        with:
+          ref: vrt
+          fetch-depth: 0
+          show-progress: false
+
+      - name: Configure git
+        run: |
+          git config user.name "vrt-sync-bot"
+          git config user.email "vrt-sync-bot@users.noreply.github.com"
+
+      - name: Fetch upstream
+        id: upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/cloudflare/workerd 2>/dev/null || true
+          git fetch --no-tags upstream main
+          echo "sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          echo "short=$(git rev-parse --short=12 upstream/main)" >> "$GITHUB_OUTPUT"
+
+      - name: Update main mirror
+        run: |
+          set -euo pipefail
+          # `main` is a mirror: it never carries local commits, so overwriting it is correct.
+          git push --force origin "refs/remotes/upstream/main:refs/heads/main"
+
+      - name: Check whether vrt is behind
+        id: behind
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor upstream/main origin/vrt; then
+            echo "vrt already contains upstream/main; nothing to do."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "behind=$(git rev-list --count origin/vrt..upstream/main)" >> "$GITHUB_OUTPUT"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attempt merge
+        id: merge
+        if: steps.behind.outputs.needed == 'true'
+        run: |
+          set -euo pipefail
+          branch="sync/upstream-$(date -u +%Y%m%d)"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          git checkout -B "$branch" origin/vrt
+          if git merge --no-edit --no-ff upstream/main; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+            git log --oneline -1
+          else
+            # Never push conflict markers. A conflicted PR is opened from upstream's tree
+            # instead, so a human resolves it with full context.
+            git merge --abort
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push clean merge
+        if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'true'
+        run: git push --force origin "${{ steps.merge.outputs.branch }}"
+
+      - name: Open merge PR
+        id: pr
+        if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+          BEHIND: ${{ steps.behind.outputs.behind }}
+        run: |
+          set -euo pipefail
+          gh label create sync --color 1D76DB --description "Upstream workerd sync" --force >/dev/null
+          body=$(cat <<EOF
+          Weekly merge of \`cloudflare/workerd@${UPSTREAM_SHA}\` into \`vrt\`.
+
+          - Commits merged: ${BEHIND}
+          - Merge commit: $(git rev-parse HEAD)
+          - Upstream diff: https://github.com/cloudflare/workerd/compare/main...${UPSTREAM_SHA}
+
+          Opened by the scheduled \`vrt-sync-upstream\` workflow. Merge only after the \`VRT build\`
+          check for this PR is green; merging publishes nothing on its own (releases are tagged
+          builds, see FORK.md).
+          EOF
+          )
+          if pr=$(gh pr list --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
+            gh pr comment "$pr" --body "Re-ran the sync; branch updated to $(git rev-parse HEAD)."
+            echo "number=$pr" >> "$GITHUB_OUTPUT"
+          else
+            url=$(gh pr create --base vrt --head "$BRANCH" \
+              --title "chore: sync workerd upstream $(git rev-parse --short=12 "$UPSTREAM_SHA")" \
+              --body "$body" --label sync)
+            gh pr comment "$url" --body "Kicking off \`VRT build\` for the merge commit."
+            echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A PR opened with GITHUB_TOKEN does not trigger pull_request workflows (GitHub's
+      # recursion guard), so start the build explicitly. Its checks attach to the branch head.
+      - name: Dispatch build
+        if: steps.pr.outputs.number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+        run: gh workflow run vrt-build.yml --ref "$BRANCH"
+
+      - name: Prepare conflict branch
+        if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'false'
+        run: |
+          set -euo pipefail
+          branch="${{ steps.merge.outputs.branch }}"
+          # The branch holds upstream's tree unchanged; the PR into vrt renders the conflict.
+          git checkout -B "$branch" upstream/main
+          git push --force origin "$branch"
+
+      - name: Collect conflicted files
+        id: conflicts
+        if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'false'
+        run: |
+          set -euo pipefail
+          # --name-only prints "CONFLICT (content): Merge conflict in <path>" style lines plus a
+          # machine-readable section; keep only the paths for the PR comment.
+          git merge-tree --write-tree --name-only origin/vrt upstream/main \
+            | sed -n '/^CONFLICT/p' | sed 's/.*Merge conflict in //' | sort -u > /tmp/conflicts.txt || true
+          if [ ! -s /tmp/conflicts.txt ]; then
+            echo "(git did not report paths; run the merge locally for details)" > /tmp/conflicts.txt
+          fi
+          cat /tmp/conflicts.txt
+
+      - name: Open conflict PR
+        if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.merge.outputs.branch }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh label create sync-conflict --color B60205 --description "Upstream sync needs manual conflict resolution" --force >/dev/null
+          body=$(cat <<EOF
+          Automated merge of \`cloudflare/workerd@${UPSTREAM_SHA}\` into \`vrt\` **conflicts**.
+
+          Conflicted files:
+
+          \`\`\`
+          $(cat /tmp/conflicts.txt)
+          \`\`\`
+
+          The head branch holds upstream's tree, so GitHub shows the real conflict. Resolve it
+          here with the "Resolve conflicts" editor or locally:
+
+          \`\`\`bash
+          git fetch origin vrt ${BRANCH}
+          git switch -c resolve/${UPSTREAM_SHA:0:12} origin/vrt
+          git merge ${BRANCH}       # resolve, then commit
+          git push origin HEAD:${BRANCH}
+          \`\`\`
+
+          Prefer keeping our patch files (\`standalone-*\`, \`vrt-*\`) and taking upstream for
+          everything else, then re-check the hooks listed in FORK.md. No build runs until the
+          conflict is gone.
+          EOF
+          )
+          if pr=$(gh pr list --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
+            gh pr comment "$pr" --body "Sync re-ran; still conflicting."
+            echo "number=$pr" >> "$GITHUB_OUTPUT"
+          else
+            gh pr create --base vrt --head "$BRANCH" \
+              --title "chore: sync workerd upstream $(git rev-parse --short=12 "$UPSTREAM_SHA") (conflicts)" \
+              --body "$body" --label sync --label sync-conflict
+          fi
+
+      - name: Summarize
+        run: |
+          {
+            echo "### VRT upstream sync"
+            echo
+            echo "- upstream: \`${{ steps.upstream.outputs.sha }}\`"
+            echo "- needed: ${{ steps.behind.outputs.needed }}"
+            echo "- clean merge: ${{ steps.merge.outputs.clean || 'n/a' }}"
+            echo "- branch: \`${{ steps.merge.outputs.branch || 'n/a' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

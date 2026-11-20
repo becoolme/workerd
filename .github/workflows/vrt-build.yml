@@ -1,0 +1,248 @@
+name: VRT build
+
+# Builds the VRT (Vibeploy Runtime) workerd binaries on GitHub-hosted runners so the
+# local machine never has to carry the Bazel toolchain or a multi-gigabyte output tree.
+#
+# - pull_request: compile check for patches landing on `vrt`.
+# - workflow_dispatch: same build, plus an optional GitHub Release.
+# - push tags `vrt-*`: release build for a tag a maintainer pushed by hand.
+
+on:
+  pull_request:
+    branches: [vrt]
+    paths:
+      - 'src/**'
+      - 'build/**'
+      - 'deps/**'
+      - 'MODULE.bazel'
+      - 'MODULE.bazel.lock'
+      - '.bazelrc'
+      - '.bazelversion'
+      - 'types/**'
+      - '.github/workflows/vrt-build.yml'
+      - '.github/actions/**'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Create a GitHub Release with this tag (e.g. vrt-20261120-abc1234). Leave empty to only build artifacts.'
+        required: false
+        type: string
+  push:
+    tags:
+      - 'vrt-*'
+
+concurrency:
+  group: vrt-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  BAZELISK_VERSION: v1.30.0
+
+jobs:
+  # Builds on every architecture Vibeploy deploys to. The matrix is deliberately small:
+  # each entry costs a cold Bazel build when the disk cache misses.
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    # A cold release build needs ~40-90 minutes; 4 hours leaves room for a slow cache miss
+    # without silently hanging a queue.
+    timeout-minutes: 240
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            arch: amd64
+            jobs: 3
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+            jobs: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          show-progress: false
+
+      # ubuntu-latest ships ~14 GB of preinstalled toolchains workerd never uses. Freeing
+      # them is the difference between a finished build and "No space left on device".
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules /opt/az /usr/lib/heroku
+          df -h /
+
+      - name: Install Bazelisk
+        run: |
+          set -euo pipefail
+          url="https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}"
+          curl -fsSL -o /tmp/bazelisk "${url}/bazelisk-linux-${{ matrix.arch }}"
+          curl -fsSL -o /tmp/bazelisk.sha256 "${url}/bazelisk-linux-${{ matrix.arch }}.sha256"
+          (cd /tmp && sha256sum -c <(awk '{print $1"  bazelisk"}' bazelisk.sha256))
+          sudo install -m 0755 /tmp/bazelisk /usr/local/bin/bazel
+          bazel version | head -3
+
+      # The disk cache is what keeps a patch-only rebuild in minutes instead of an hour.
+      # Keys intentionally do not include per-commit hashes: a cache entry is a superset of
+      # actions, so an older entry is still useful (upstream prunes large entries instead).
+      - name: Cache Bazel actions
+        uses: actions/cache@v4
+        with:
+          path: ~/bazel-disk-cache
+          key: bazel-${{ runner.os }}-${{ matrix.arch }}-${{ hashFiles('.bazelversion', '.bazelrc', 'MODULE.bazel', 'build/ci.bazelrc') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-${{ matrix.arch }}-
+
+      # Keep the repo's git hooks out of the build (they run on commit, not build), and make
+      # sure Bazel uses the same toolchain flags upstream CI uses.
+      - name: Build workerd
+        run: |
+          set -euo pipefail
+          bazel build \
+            --config=ci-release \
+            --config=release_linux \
+            --strip=always \
+            --disk_cache="$HOME/bazel-disk-cache" \
+            --jobs=${{ matrix.jobs }} \
+            --local_cpu_resources=${{ matrix.jobs }} \
+            --show_progress_rate_limit=10 \
+            //src/workerd/server:workerd
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          ./bazel-bin/src/workerd/server/workerd --version
+          # Fail the build if the binary cannot evaluate a trivial Worker. `embed` paths are
+          # resolved relative to the config file, so run the smoke test inside /tmp.
+          mkdir -p /tmp/vrt-smoke && cd /tmp/vrt-smoke
+          cat > smoke.js <<'EOF'
+          export default { fetch() { return new Response("vrt-ok"); } };
+          EOF
+          cat > smoke.capnp <<'EOF'
+          using Workerd = import "/workerd/workerd.capnp";
+          const config :Workerd.Config = (
+            services = [ (name = "main", worker = (
+              modules = [ (name = "smoke.js", esModule = embed "smoke.js") ],
+              compatibilityDate = "2026-09-01",
+            )) ],
+            sockets = [ (name = "http", address = "127.0.0.1:18080", http = (), service = "main") ],
+          );
+          EOF
+          "$GITHUB_WORKSPACE/bazel-bin/src/workerd/server/workerd" serve --experimental smoke.capnp &
+          server_pid=$!
+          trap 'kill $server_pid 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do
+            if body=$(curl -fsS http://127.0.0.1:18080/ 2>/dev/null); then
+              [ "$body" = "vrt-ok" ] || { echo "unexpected body: $body"; exit 1; }
+              echo "smoke ok"
+              exit 0
+            fi
+            sleep 0.2
+          done
+          echo "workerd did not answer within 10s"
+          exit 1
+
+      # Trim the same way upstream does: entries over 100 MB make the cache snowball and
+      # GitHub caps the repository cache at ~10 GB.
+      - name: Trim Bazel cache
+        if: always()
+        run: |
+          if [ -d "$HOME/bazel-disk-cache" ]; then
+            find "$HOME/bazel-disk-cache" -size +100M -type f -delete || true
+            du -sh "$HOME/bazel-disk-cache" || true
+          fi
+
+      - name: Package binary
+        id: package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp -L ./bazel-bin/src/workerd/server/workerd "dist/workerd-${{ matrix.name }}"
+          chmod +x "dist/workerd-${{ matrix.name }}"
+          gzip -9 -n -c "dist/workerd-${{ matrix.name }}" > "dist/workerd-${{ matrix.name }}.gz"
+          (cd dist && sha256sum "workerd-${{ matrix.name }}.gz" > "workerd-${{ matrix.name }}.gz.sha256")
+          ls -lh dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: workerd-${{ matrix.name }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # Publishes the artifacts of a release build. Runs only when asked: a tag push or an
+  # explicit tag name in the dispatch input. Platform pins read the release assets, never
+  # a moving branch.
+  release:
+    name: release
+    needs: build
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.release_tag != '')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          show-progress: false
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write manifest
+        run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}"
+          commit="$(git rev-parse HEAD)"
+          {
+            echo '{'
+            echo "  \"tag\": \"${tag}\","
+            echo "  \"commit\": \"${commit}\","
+            echo "  \"builtAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+            echo "  \"run\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\","
+            echo '  "assets": {'
+            first=1
+            for f in dist/*.sha256; do
+              asset="$(basename "$f" .sha256)"
+              sha="$(awk '{print $1}' "$f")"
+              [ $first -eq 1 ] || echo ','
+              first=0
+              printf '    "%s": "%s"' "$asset" "$sha"
+            done
+            echo
+            echo '  }'
+            echo '}'
+          } > dist/manifest.json
+          cat dist/manifest.json
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            gh release create "$tag" dist/* \
+              --title "$tag" \
+              --notes "VRT workerd build from ${GITHUB_SHA}. See manifest.json for per-asset sha256."
+          else
+            gh release create "$tag" dist/* \
+              --title "$tag" \
+              --notes "VRT workerd build from ${GITHUB_SHA}. See manifest.json for per-asset sha256." \
+              --target "$GITHUB_SHA"
+          fi
