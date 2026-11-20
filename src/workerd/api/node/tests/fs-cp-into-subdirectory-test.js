@@ -164,3 +164,23 @@ export const FsCpDeepTree = {
     );
   },
 };
+
+// A tree as deep as a path can reach still copies.
+export const FsCpDeepestPathTree = {
+  test() {
+    const segments = 'd/'.repeat(45);
+    mkdirSync(new URL(`file:///tmp/tall/${segments}`), { recursive: true });
+    writeFileSync(new URL(`file:///tmp/tall/${segments}leaf.txt`), 'leaf');
+
+    cpSync(new URL('file:///tmp/tall'), new URL('file:///tmp/tall-copy'), {
+      recursive: true,
+    });
+    strictEqual(
+      readFileSync(
+        new URL(`file:///tmp/tall-copy/${segments}leaf.txt`),
+        'utf8'
+      ),
+      'leaf'
+    );
+  },
+};

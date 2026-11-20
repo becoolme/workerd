@@ -1513,11 +1513,28 @@ void handleCpFile(jsg::Lock& js,
   node::THROW_ERR_UV_EINVAL(js, "cp"_kj);
 }
 
+// How deep handleCpDir() may recurse: the limit NormalizedFilePath::validate() puts on a path's
+// segments. A deeper tree can only be built by renaming or linking directories into one another,
+// and each level of a copy is a native stack frame of up to several kilobytes in debug builds.
+// V8 must still be able to throw at the deepest level, which it refuses once the stack has grown
+// past its own limit of about 1 MiB (a debug build failed that check at 256 levels).
+constexpr uint kMaxCpDepth = 48;
+
+struct CpState {
+  // The directories the copy has written into, held so that their addresses stay unique. If the
+  // copy meets one of them as a source directory, the destination lies inside the source (reached
+  // through a symbolic link, which cpImpl()'s check on the paths cannot see), and copying it would
+  // recurse without end.
+  kj::HashMap<const workerd::Directory*, kj::Rc<workerd::Directory>> destinations;
+  uint depth = 0;
+};
+
 void handleCpDir(jsg::Lock& js,
     const workerd::VirtualFileSystem& vfs,
     kj::Rc<workerd::Directory> src,
     kj::Rc<workerd::Directory> dest,
-    const FileSystemModule::CpOptions& options) {
+    const FileSystemModule::CpOptions& options,
+    CpState& state) {
   auto stat = dest->stat(js);
   if (!stat.writable) {
     node::THROW_ERR_UV_EPERM(js, "cp"_kj, "Destination directory is not writable"_kj);
@@ -1525,6 +1542,12 @@ void handleCpDir(jsg::Lock& js,
   if (src.get() == dest.get()) {
     node::THROW_ERR_UV_EINVAL(js, "cp"_kj, "Source and destination directories are the same"_kj);
   }
+  if (state.depth >= kMaxCpDepth) {
+    node::THROW_ERR_UV_ENAMETOOLONG(js, "cp"_kj, "Directory tree is too deep to copy"_kj);
+  }
+  ++state.depth;
+  KJ_DEFER(--state.depth);
+  state.destinations.upsert(dest.get(), dest.addRef());
 
   // entries store the reference to the node and the name of the entry
   // of all the entries in the source directory, to ensure they remain valid
@@ -1645,7 +1668,11 @@ void handleCpDir(jsg::Lock& js,
       }
       KJ_CASE_ONEOF(dir, kj::Rc<workerd::Directory>) {
         // We have a directory, we will copy it to the destination directory
-        // recursively.
+        // recursively, unless this copy has already written into it.
+        if (state.destinations.find(dir.get()) != kj::none) {
+          node::THROW_ERR_FS_CP_EINVAL(
+              js, kj::str("Cannot copy a directory to a subdirectory of itself: ", name));
+        }
 
         // First, we need to check if the destination directory already exists.
         KJ_IF_SOME(existing,
@@ -1661,7 +1688,7 @@ void handleCpDir(jsg::Lock& js,
                   js, "cp"_kj, kj::str("Cannot copy directory to file: ", name));
             }
             KJ_CASE_ONEOF(existingDir, kj::Rc<workerd::Directory>) {
-              handleCpDir(js, vfs, kj::mv(dir), kj::mv(existingDir), options);
+              handleCpDir(js, vfs, kj::mv(dir), kj::mv(existingDir), options, state);
             }
             KJ_CASE_ONEOF(existingLink, kj::Rc<workerd::SymbolicLink>) {
               // The destination is a symbolic link, we can overwrite it with a directory.
@@ -1681,7 +1708,7 @@ void handleCpDir(jsg::Lock& js,
             throwFsError(js, err, "cp"_kj);
           }
           // Now we can recursively copy the contents of the source directory into the new one.
-          handleCpDir(js, vfs, kj::mv(dir), kj::mv(newDir), options);
+          handleCpDir(js, vfs, kj::mv(dir), kj::mv(newDir), options, state);
         }
       }
       KJ_CASE_ONEOF(link, kj::Rc<workerd::SymbolicLink>) {
@@ -1777,7 +1804,8 @@ void handleCpDir(jsg::Lock& js,
       }
       KJ_CASE_ONEOF(destination, kj::Rc<workerd::Directory>) {
         // Nice... we have our destination directory. Continue to copy the contents.
-        return handleCpDir(js, vfs, kj::mv(src), kj::mv(destination), options);
+        CpState state;
+        return handleCpDir(js, vfs, kj::mv(src), kj::mv(destination), options, state);
       }
       KJ_CASE_ONEOF(link, kj::Rc<workerd::SymbolicLink>) {
         // This shouldn't be possible since we told tryOpen to follow links.
@@ -1929,7 +1957,8 @@ void cpImpl(jsg::Lock& js,
               // directory into the destination directory, only applying the force and
               // errorOnExist options to individual files within the directories.
               // See: https://github.com/nodejs/node/issues/58947
-              return handleCpDir(js, vfs, kj::mv(dir), kj::mv(destDir), options);
+              CpState state;
+              return handleCpDir(js, vfs, kj::mv(dir), kj::mv(destDir), options, state);
             }
             KJ_CASE_ONEOF(link, kj::Rc<workerd::SymbolicLink>) {
               // Also a simple case, user is trying to copy a directory over
