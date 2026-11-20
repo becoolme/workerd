@@ -104,6 +104,12 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           git checkout -B "$branch" origin/vrt
           if git merge --no-edit --no-ff upstream/main; then
+            # Record which upstream commit this tree carries. Release manifests read it so a
+            # binary can be traced to a workerd version without archaeology on the merge commit.
+            mkdir -p .vrt
+            printf '%s\n' "${{ steps.upstream.outputs.sha }}" > .vrt/upstream
+            git add .vrt/upstream
+            git commit --amend --no-edit
             echo "clean=true" >> "$GITHUB_OUTPUT"
             git log --oneline -1
           else
@@ -231,9 +237,11 @@ jobs:
           git push origin HEAD:${BRANCH}
           \`\`\`
 
-          Prefer keeping our patch files (\`standalone-*\`, \`vrt-*\`) and taking upstream for
-          everything else, then re-check the hooks listed in FORK.md. No build runs until the
-          conflict is gone.
+          Prefer keeping our patch files (\`vrt-*\`) and taking upstream for everything else,
+          then re-check the hooks listed in FORK.md. No build runs until the conflict is gone.
+
+          When you resolve it, also write \`${UPSTREAM_SHA}\` into \`.vrt/upstream\` and commit
+          it: release manifests use that file to record the upstream commit and tag.
           EOF
           )
           if pr=$(gh pr list --repo "$GH_REPO" --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then

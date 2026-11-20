@@ -80,7 +80,16 @@ workerd-linux-x64.gz
 workerd-linux-x64.gz.sha256
 workerd-linux-arm64.gz
 workerd-linux-arm64.gz.sha256
-manifest.json     # tag, source commit, build time, per-asset sha256
+manifest.json     # tag, source commit, upstream commit/tag, build time, per-asset sha256
+```
+
+`.vrt/upstream` in the tree records the `cloudflare/workerd` commit the current branch was
+last synced to; the sync workflow writes it into the merge commit, and the release job resolves
+it to the nearest upstream tag (Cloudflare tags `main` roughly daily, so the tag may be absent
+when the sync is ahead of the newest release). Resolve a binary to an upstream version with:
+
+```bash
+gh release download <vrt-tag> --pattern manifest.json --repo becoolme/workerd -O -
 ```
 
 Cut a release from a green `vrt` commit:

@@ -216,7 +216,31 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Resolve upstream commit
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          commit=""
+          tag=""
+          if [ -f .vrt/upstream ]; then
+            commit="$(tr -d '[:space:]' < .vrt/upstream)"
+          fi
+          if [ -n "$commit" ]; then
+            # cloudflare/workerd tags main roughly daily, so the synced commit is often a few
+            # commits past the newest tag. Record the commit always, the tag when it matches.
+            tag="$(gh api "repos/cloudflare/workerd/tags?per_page=100" \
+              | jq -r --arg sha "$commit" '.[] | select(.commit.sha == $sha) | .name' \
+              | head -1 || true)"
+          fi
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: Write manifest
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
         run: |
           set -euo pipefail
           tag="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.release_tag }}"
@@ -225,6 +249,7 @@ jobs:
             echo '{'
             echo "  \"tag\": \"${tag}\","
             echo "  \"commit\": \"${commit}\","
+            echo "  \"upstream\": {\"commit\": \"${UPSTREAM_COMMIT}\", \"tag\": \"${UPSTREAM_TAG}\"},"
             echo "  \"builtAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
             echo "  \"run\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\","
             echo '  "assets": {'
