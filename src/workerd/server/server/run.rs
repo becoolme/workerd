@@ -602,7 +602,8 @@ async fn start_local(
         for entrypoint in worker.entrypoint_names() {
             if entrypoints.matches(entrypoint)
                 && worker.has_handler(Some(entrypoint), handler)
-                && let Some(channel) = worker.entrypoint(Some(entrypoint), None, false)
+                && let Some(channel) =
+                    worker.entrypoint(Some(entrypoint), None, false, ffi::WorkerLimits::default())
             {
                 targets.push(target(channel, format!("{name}:{entrypoint}")));
             }

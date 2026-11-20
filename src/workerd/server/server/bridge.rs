@@ -124,7 +124,10 @@ pub mod ffi {
     }
 
     /// The `limits` group of a config Worker: per-invocation CPU and subrequest budgets plus the
-    /// isolate heap budget. Every field is 0 when the dimension is unlimited.
+    /// isolate heap budget. Every field is 0 when the dimension is unlimited. Also carries a
+    /// `getEntrypoint()`/`getDurableObjectClass()` options' `limits`: the lower of it and the
+    /// Worker's own limits applies to the invocation.
+    #[derive(Clone, Copy, Default)]
     struct WorkerLimits {
         cpu_ms: u32,
         memory_mb: u32,
@@ -141,7 +144,9 @@ pub mod ffi {
         /// `accessBlobHeader`, when set: requests carrying this header have it parsed into the
         /// request's access info.
         access_blob_header: KjMaybe<String>,
-        /// The Worker's configured resource limits; all zero for dynamic workers.
+        /// The Worker's configured resource limits; for a dynamic worker, the loading worker's
+        /// `limits` group, which the factory merges with the source's `code.limits` — the lower
+        /// of the two wins.
         limits: WorkerLimits,
     }
 
@@ -479,6 +484,8 @@ pub mod ffi {
         /// for a request that is itself a tail worker's, so that tails do not trace themselves,
         /// and none for a dynamic worker, whose tails are its source's and the factory's own).
         /// A static worker's entrypoint mints its own self token, which restores a stub to it.
+        /// `entrypoint_limits` is a `getEntrypoint()`/`getDurableObjectClass()` options' limits;
+        /// all zero for every caller that cannot pass one.
         fn worker_start_request(
             worker: &CompiledWorker,
             entrypoint: KjMaybe<&str>,
@@ -487,6 +494,7 @@ pub mod ffi {
             channels: Box<ChannelFactory>,
             metadata: KjOwn<RequestMetadata>,
             tails: Box<WorkerInterfaceList>,
+            entrypoint_limits: WorkerLimits,
         ) -> Result<KjOwn<WorkerInterface>>;
         /// Runs an idle actor's captured hook and flushes its writes, without starting a request
         /// through the container's retirement gate or counting the actor as active. `tails`
@@ -1063,15 +1071,20 @@ pub mod ffi {
 
         /// A loaded dynamic worker.
         type WorkerStub;
+        /// `limits` is the `getEntrypoint()` options' limits; all zero when none was given.
         fn entrypoint(
             self: &WorkerStub,
             name: KjMaybe<&str>,
             props: KjOwn<Frankenvalue>,
+            limits: WorkerLimits,
         ) -> Box<SubrequestChannel>;
+        /// `limits` is the `getDurableObjectClass()` options' limits; all zero when none was
+        /// given.
         fn actor_class(
             self: &WorkerStub,
             name: KjMaybe<&str>,
             props: KjOwn<Frankenvalue>,
+            limits: WorkerLimits,
         ) -> Box<ActorClassChannel>;
 
         /// Something that can start a request: a worker entrypoint, an actor, an external

@@ -64,6 +64,18 @@ struct VrtWorkerLimits {
   }
 };
 
+// The documented merge for a nested limit ("the lower of the two limits is used"): a set
+// dimension wins over 0 (unlimited), the smaller set value wins otherwise.
+constexpr uint32_t vrtLowerOf(uint32_t a, uint32_t b) {
+  return a == 0 ? b : b == 0 ? a : (a < b ? a : b);
+}
+
+constexpr VrtWorkerLimits vrtLowerOf(VrtWorkerLimits a, VrtWorkerLimits b) {
+  return {.cpuMs = vrtLowerOf(a.cpuMs, b.cpuMs),
+    .memoryMb = vrtLowerOf(a.memoryMb, b.memoryMb),
+    .subRequests = vrtLowerOf(a.subRequests, b.subRequests)};
+}
+
 // The memory budget in bytes, 0 when unlimited. Cannot overflow: `memoryMb` is 32 bits.
 uint64_t vrtMemoryLimitBytes(uint32_t memoryMb);
 

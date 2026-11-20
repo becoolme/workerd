@@ -1208,7 +1208,12 @@ impl<'a> WorkflowEngine<'a> {
         );
 
         let engine_class = self.engine_class.as_deref();
-        let Some(actor_class) = self.engine.actor_class(engine_class, Some(props), false) else {
+        let Some(actor_class) = self.engine.actor_class(
+            engine_class,
+            Some(props),
+            false,
+            ffi::WorkerLimits::default(),
+        ) else {
             self.report.service_reference_error(
                 self.name,
                 &self.engine_name,
@@ -1354,7 +1359,12 @@ pub fn lookup_service(
         }
         return service.channel();
     };
-    if let Some(channel) = worker.entrypoint(entrypoint.as_deref(), Some(props), false) {
+    if let Some(channel) = worker.entrypoint(
+        entrypoint.as_deref(),
+        Some(props),
+        false,
+        ffi::WorkerLimits::default(),
+    ) {
         channel
     } else if let Some(entrypoint) = entrypoint {
         report.reference_error(
@@ -1432,7 +1442,12 @@ pub fn lookup_actor_class(
         }
         return Rc::new(InvalidConfigActorClass);
     };
-    if let Some(class) = worker.actor_class(entrypoint.as_deref(), Some(props), false) {
+    if let Some(class) = worker.actor_class(
+        entrypoint.as_deref(),
+        Some(props),
+        false,
+        ffi::WorkerLimits::default(),
+    ) {
         class
     } else if let Some(entrypoint) = entrypoint {
         report.reference_error(
@@ -1676,6 +1691,7 @@ impl Server {
                 tails,
                 streaming_tails,
                 worker_loaders,
+                worker_limits: worker.config_limits(),
                 access_binding_channel,
                 has_debug_port: pending.bindings.has_debug_port,
                 server: Rc::downgrade(self),
@@ -1921,7 +1937,7 @@ impl ServerHandle {
         let entrypoint: Option<&str> = entrypoint.into();
         self.server()?
             .stub_worker(service_name)?
-            .entrypoint(entrypoint, Some(props), persistent)
+            .entrypoint(entrypoint, Some(props), persistent, ffi::WorkerLimits::default())
             .map(SubrequestChannel::new)
             .ok_or_else(|| {
                 kj::failed!(
@@ -1942,7 +1958,7 @@ impl ServerHandle {
         let class_name: Option<&str> = class_name.into();
         self.server()?
             .stub_worker(service_name)?
-            .actor_class(class_name, Some(props), persistent)
+            .actor_class(class_name, Some(props), persistent, ffi::WorkerLimits::default())
             .map(ActorClassChannel::new)
             .ok_or_else(|| {
                 kj::failed!(
@@ -2000,6 +2016,7 @@ impl ServerHandle {
                 entrypoint,
                 Some(props.unwrap_or_else(ffi::frankenvalue_new)),
                 false,
+                ffi::WorkerLimits::default(),
             )
             .map(SubrequestChannel::new)
             .ok_or_else(|| {

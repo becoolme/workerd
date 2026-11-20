@@ -252,7 +252,8 @@ kj::Own<WorkerInterface> worker_start_request(const CompiledWorker& worker,
     kj::Maybe<const ActorHandle&> actor,
     ::rust::Box<ChannelFactory> channels,
     kj::Own<RequestMetadata> metadata,
-    ::rust::Box<WorkerInterfaceList> tails);
+    ::rust::Box<WorkerInterfaceList> tails,
+    WorkerLimits entrypointLimits);
 kj::Promise<void> worker_run_actor_on_hibernate(const CompiledWorker& worker,
     const ActorHandle& actor,
     ::rust::Str className,
