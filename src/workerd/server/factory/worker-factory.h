@@ -50,6 +50,9 @@ namespace workerd::server {
 
 // Rust types of the bridge, defined in server/channels.rs and server/tasks.rs.
 struct ServerHandle;
+// Defined in server/bridge.rs; only ever passed by value through this header, so a forward
+// declaration is enough for callers that never construct one.
+struct WorkerLimits;
 struct ChannelFactory;
 struct SubrequestChannel;
 struct SpawnedTask;
