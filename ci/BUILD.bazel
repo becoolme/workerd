@@ -1,6 +1,18 @@
 load("@rules_python//python:defs.bzl", "py_test")
 
 py_test(
+    name = "flaky_tests_test",
+    size = "small",
+    srcs = [
+        "flaky_tests.py",
+        "flaky_tests_test.py",
+    ],
+    # The test imports flaky_tests.py as a top-level module.
+    imports = ["."],
+    main = "flaky_tests_test.py",
+)
+
+py_test(
     name = "v8_update_test",
     size = "small",
     srcs = [
