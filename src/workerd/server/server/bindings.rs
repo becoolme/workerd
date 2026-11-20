@@ -93,6 +93,8 @@ pub struct WorkerLoaderDesignator {
     pub name: String,
     /// Bindings with the same id share one loader.
     pub id: Option<String>,
+    /// The cap on live workers under this loader; 0 means unbounded.
+    pub max_workers: u32,
 }
 
 /// A configured Workflow (`workflowsEngine.workflows`) the config's first pass found valid.
@@ -605,6 +607,7 @@ impl Compiler<'_> {
         self.out.worker_loaders.push(WorkerLoaderDesignator {
             name: id.clone().unwrap_or_else(|| name.to_owned()),
             id,
+            max_workers: loader.get_max_workers(),
         });
         global.set_worker_loader(channel);
         Ok(())

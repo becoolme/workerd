@@ -475,7 +475,9 @@ fn experimental_bindings_are_refused_without_the_flag() {
         class.init_durable_object_class().set_name("svc");
         let mut loader = bindings.reborrow().get(3);
         loader.set_name("LOADER");
-        loader.init_worker_loader().set_id("loader-id");
+        let mut loader_group = loader.init_worker_loader();
+        loader_group.set_id("loader-id");
+        loader_group.set_max_workers(7);
         let mut anonymous_loader = bindings.reborrow().get(4);
         anonymous_loader.set_name("ANON_LOADER");
         anonymous_loader.init_worker_loader();
@@ -539,10 +541,12 @@ fn experimental_bindings_are_refused_without_the_flag() {
             WorkerLoaderDesignator {
                 name: "loader-id".to_owned(),
                 id: Some("loader-id".to_owned()),
+                max_workers: 7,
             },
             WorkerLoaderDesignator {
                 name: "ANON_LOADER".to_owned(),
                 id: None,
+                max_workers: 0,
             },
         ]
     );

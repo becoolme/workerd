@@ -141,6 +141,7 @@ setting "Allow GitHub Actions to create and approve pull requests" must stay ena
 | Patch | Files | Purpose |
 | --- | --- | --- |
 | `limits` (W2) | `src/workerd/server/vrt-limits.{h,c++}`, `thread-*` helpers in the same file, `workerd.capnp`, `worker.rs`, `bridge.rs`, `loader.rs`, `config.rs`, `run.rs`, `worker-factory.c++` | Per-Worker CPU / memory / subrequest limits with Cloudflare's error semantics. Dynamically loaded Workers honor `WorkerCode.limits` and `getEntrypoint()`/`getDurableObjectClass()` `options.limits` (the documented lower-of-the-two merge), capped by the loading Worker's `limits` group |
+| `loader-quotas` | `workerd.capnp`, `bindings.rs`, `loader.rs`, `config.rs`, `bindings-test.rs` | `workerLoader.maxWorkers`: bounds the live dynamic workers one loader may hold (loading, loaded or serving, named or not); `get()`/`load()` past the bound fail until a worker's handles are released. `maxWorkers` is a fork field number (@29) — upstream may not reuse it |
 
 Anything that changes public behaviour must also be reflected in Vibeploy's
 `doc/platform/workers-runtime-quotas.md`.
