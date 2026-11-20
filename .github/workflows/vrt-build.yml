@@ -47,6 +47,11 @@ jobs:
   build:
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    # A PR opened by the sync bot arrives as `github-actions[bot]`; GitHub parks its
+    # `pull_request` run in `action_required` instead of running it. The sync workflow
+    # dispatches this build explicitly instead, so skip the unusable run rather than leaving
+    # a pending check on the PR.
+    if: github.event_name != 'pull_request' || github.actor != 'github-actions[bot]'
     # A cold release build needs ~40-90 minutes; 4 hours leaves room for a slow cache miss
     # without silently hanging a queue.
     timeout-minutes: 240
