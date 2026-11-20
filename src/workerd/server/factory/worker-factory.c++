@@ -22,6 +22,7 @@
 #include <workerd/server/actor-id-impl.h>
 #include <workerd/server/compiled-bindings.capnp.h>
 #include <workerd/server/fallback-service.h>
+#include <workerd/server/vrt-limits.h>
 #include <workerd/server/workerd-api.h>
 #include <workerd/util/autogate.h>
 #include <workerd/util/strings.h>
@@ -637,11 +638,13 @@ class WorkerStubChannelHandle final: public WorkerStubChannel {
 
   kj::Rc<IoChannelFactory::SubrequestChannel> getEntrypointResolved(
       kj::Maybe<kj::String> name, Frankenvalue props, kj::Maybe<ResourceLimits> limits) override {
-    return subrequest_channel_into_kj(stub->entrypoint(toRust(name), toOwn(kj::mv(props))));
+    return subrequest_channel_into_kj(
+        stub->entrypoint(toRust(name), toOwn(kj::mv(props)), toWorkerLimits(limits)));
   }
   kj::Rc<IoChannelFactory::ActorClassChannel> getActorClassResolved(
       kj::Maybe<kj::String> name, Frankenvalue props, kj::Maybe<ResourceLimits> limits) override {
-    return actor_class_channel_into_kj(stub->actor_class(toRust(name), toOwn(kj::mv(props))));
+    return actor_class_channel_into_kj(
+        stub->actor_class(toRust(name), toOwn(kj::mv(props)), toWorkerLimits(limits)));
   }
 
  private:
@@ -649,6 +652,17 @@ class WorkerStubChannelHandle final: public WorkerStubChannel {
 
   static kj::Maybe<::rust::Str> toRust(kj::Maybe<kj::String>& name) {
     return name.map([](kj::String& n) { return server::toRust(n); });
+  }
+
+  // The `getEntrypoint()`/`getDurableObjectClass()` options in the bridge's all-zero form:
+  // the lower of these limits and the Worker's own applies to the invocation.
+  static WorkerLimits toWorkerLimits(const kj::Maybe<ResourceLimits>& limits) {
+    WorkerLimits result = {};
+    KJ_IF_SOME(l, limits) {
+      result.cpu_ms = l.cpuMs.orDefault(0);
+      result.sub_requests = l.subRequests.orDefault(0);
+    }
+    return result;
   }
 };
 
@@ -1162,6 +1176,7 @@ kj::Own<WorkerInterface> createEntrypoint(CompiledWorker::Impl& worker,
     kj::Maybe<kj::Own<Worker::Actor>> actor,
     ::rust::Box<ChannelFactory> channels,
     ::rust::Box<WorkerInterfaceList> tails,
+    WorkerLimits entrypointLimits,
     kj::Maybe<kj::Own<AccessInfo>> accessInfo) {
   auto& threadContext = worker.factory.getImpl().threadContext;
 
@@ -1184,8 +1199,24 @@ kj::Own<WorkerInterface> createEntrypoint(CompiledWorker::Impl& worker,
   }
 
   auto ioChannelFactory = kj::rc<RustIoChannelFactory>(kj::addRef(worker), kj::mv(channels));
+  // An unlimited Worker keeps the null enforcer byte-for-byte. A limited one gets a fresh
+  // per-invocation enforcer: CPU and subrequest budgets are per request, and the isolate state it
+  // shares with the isolate enforcer carries the heap-limit verdict. A `getEntrypoint()` /
+  // `getDurableObjectClass()` options' limits lower the Worker's own for this invocation — the
+  // documented "lower of the two" merge.
+  kj::Own<LimitEnforcer> limitEnforcer;
+  auto limits = vrtLowerOf(worker.limits,
+      VrtWorkerLimits{.cpuMs = entrypointLimits.cpu_ms,
+        .memoryMb = entrypointLimits.memory_mb,
+        .subRequests = entrypointLimits.sub_requests});
+  if (limits.any()) {
+    limitEnforcer = kj::refcounted<VrtLimitEnforcer>(
+        limits, kj::atomicAddRef(*KJ_ASSERT_NONNULL(worker.isolateLimits)));
+  } else {
+    limitEnforcer = kj::refcounted<NullLimitEnforcer>();
+  }
   return newWorkerEntrypoint(threadContext, kj::atomicAddRef(worker.getWorker()),
-      entrypointName.clone(), kj::mv(props), kj::mv(actor), kj::refcounted<NullLimitEnforcer>(), {},
+      entrypointName.clone(), kj::mv(props), kj::mv(actor), kj::mv(limitEnforcer), {},
       kj::mv(ioChannelFactory), kj::mv(observer), worker.waitUntilTasks, true, kj::mv(workerTracer),
       kj::mv(metadata.cfBlobJson), kj::none, kj::mv(triggerContext), IsDynamicDispatch::NO,
       kj::mv(accessInfo), kj::mv(metadata.restoredSelfTokenFactory), metadata.fromPersistentStub,
@@ -1200,7 +1231,8 @@ kj::Own<WorkerInterface> worker_start_request(const CompiledWorker& worker,
     kj::Maybe<const ActorHandle&> actor,
     ::rust::Box<ChannelFactory> channels,
     kj::Own<RequestMetadata> metadata,
-    ::rust::Box<WorkerInterfaceList> tails) {
+    ::rust::Box<WorkerInterfaceList> tails,
+    WorkerLimits entrypointLimits) {
   TRACE_EVENT("workerd", "worker_start_request()");
   auto& impl = worker.getImpl();
   auto entrypointName = toKj(entrypoint);
@@ -1223,13 +1255,14 @@ kj::Own<WorkerInterface> worker_start_request(const CompiledWorker& worker,
     return kj::heap<AccessHeaderExtractor>(kj::str(headerName), identityChannel,
         [&impl, meta = kj::mv(meta), entrypointName = kj::mv(entrypointName),
             props = kj::mv(propsValue), actor = kj::mv(actorRef), channels = kj::mv(channels),
-            tails = kj::mv(tails)](kj::Maybe<kj::Own<AccessInfo>> accessInfo) mutable {
+            tails = kj::mv(tails), entrypointLimits](
+            kj::Maybe<kj::Own<AccessInfo>> accessInfo) mutable {
       return createEntrypoint(impl, kj::mv(meta), entrypointName, kj::mv(props), kj::mv(actor),
-          kj::mv(channels), kj::mv(tails), kj::mv(accessInfo));
+          kj::mv(channels), kj::mv(tails), entrypointLimits, kj::mv(accessInfo));
     }).attach(kj::addRef(impl));
   }
   return createEntrypoint(impl, kj::mv(meta), entrypointName, kj::mv(propsValue), kj::mv(actorRef),
-      kj::mv(channels), kj::mv(tails), kj::none);
+      kj::mv(channels), kj::mv(tails), entrypointLimits, kj::none);
 }
 
 kj::Promise<void> worker_run_actor_on_hibernate(const CompiledWorker& worker,
@@ -1659,6 +1692,19 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
   TRACE_EVENT("workerd", "factory_new_worker()", "name", name.cStr());
   auto impl = kj::refcounted<CompiledWorker::Impl>(constFactory, kj::mv(name));
   impl->isDynamic = dynamicSource != kj::none;
+  if (!impl->isDynamic) {
+    impl->limits = VrtWorkerLimits{
+      .cpuMs = spec.limits.cpu_ms,
+      .memoryMb = spec.limits.memory_mb,
+      .subRequests = spec.limits.sub_requests,
+    };
+  }
+  // A dynamic Worker gets the isolate state too even while its own `code.limits` are all zero:
+  // `getEntrypoint(name, {limits})` may still put a per-invocation limit on it at request time,
+  // and CPU enforcement needs the state's isolate liveness. Its limits arrive with the source.
+  if (impl->limits.any() || impl->isDynamic) {
+    impl->isolateLimits = kj::atomicRefcounted<VrtIsolateLimitState>();
+  }
   ErrorReporter errorReporter;
   auto& options = *factory.options;
   bool experimental = options.experimental;
@@ -1691,6 +1737,18 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
     indexDynamicChannels(*impl, dynamic);
     featureFlags = dynamic.compatibilityFlags;
     source = kj::mv(dynamic.source);
+    // The Worker's own limits: the documented "lower of the two" merge of `code.limits` and the
+    // loading Worker's `limits` group, which `spec.limits` carries for a dynamic Worker. The
+    // JS-facing `ResourceLimits` has no memory dimension, so only the ceiling can bound the heap.
+    VrtWorkerLimits code;
+    KJ_IF_SOME(l, dynamic.limits) {
+      code.cpuMs = l.cpuMs.orDefault(0);
+      code.subRequests = l.subRequests.orDefault(0);
+    }
+    impl->limits = vrtLowerOf(code,
+        VrtWorkerLimits{.cpuMs = spec.limits.cpu_ms,
+          .memoryMb = spec.limits.memory_mb,
+          .subRequests = spec.limits.sub_requests});
     compileBindings = [&env = dynamic.env](
                           jsg::Lock& js, const Worker::Api&, v8::Local<v8::Object> target) {
       env.populateJsObject(js, jsg::JsObject(target));
@@ -1741,10 +1799,18 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
     }
   }
 
-  // The isolate of the Worker, or of the zygote that snapshots its startup.
+  // The isolate of the Worker, or of the zygote that snapshots its startup. A limited Worker gets
+  // the enforcing enforcer; an unlimited one keeps the null enforcer unchanged.
   auto makeIsolate = [&](kj::StringPtr isolateName, Worker::Isolate::InspectorPolicy policy,
-                         kj::Maybe<jsg::SnapshotConfig> snapshotConfig) {
-    auto limitEnforcer = kj::refcounted<NullIsolateLimitEnforcer>();
+                         kj::Maybe<jsg::SnapshotConfig> snapshotConfig,
+                         kj::Maybe<kj::Own<VrtIsolateLimitState>> limitState) {
+    kj::Own<IsolateLimitEnforcer> limitEnforcer;
+    KJ_IF_SOME(state, limitState) {
+      limitEnforcer =
+          kj::refcounted<VrtIsolateLimitEnforcer>(impl->limits.memoryMb, kj::mv(state));
+    } else {
+      limitEnforcer = kj::refcounted<NullIsolateLimitEnforcer>();
+    }
     auto listeners = KJ_MAP(listener, spec.inbound_listeners) {
       return Worker::Api::InboundListener{
         .protocol = kj::str(listener.protocol),
@@ -1783,8 +1849,12 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
   kj::Maybe<jsg::SnapshotConfig> snapshotConfig;
   // Not with a module fallback service either: the zygote has none, so a top level that tolerates
   // a failed import (`try { await import(x) } catch {}`) would bake the failure in.
+  // Not for a Worker with a memory limit either: the zygote and the snapshot it produces would be
+  // subject to the same heap budget, and deserializing a snapshot into a smaller heap can fail
+  // fatally. A limited Worker evaluates its top level in its own isolate instead, where the
+  // near-heap-limit callback can terminate it gracefully.
   if (util::Autogate::isEnabled(util::AutogateKey::STARTUP_SNAPSHOT) && !inspectorConfigured &&
-      moduleFallback == kj::none &&
+      moduleFallback == kj::none && impl->limits.memoryMb == 0 &&
       supportsStartupSnapshot(impl->name, featureFlags, workerSource, envGlobals)) {
     // The zygote reports into a reporter of its own: its failures must never surface as the
     // Worker's.
@@ -1792,7 +1862,10 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
     auto zygoteIsolate =
         makeIsolate(kj::str(impl->name, "-snapshot"), Worker::Isolate::InspectorPolicy::DISALLOW,
             jsg::SnapshotConfig(
-                jsg::MutableSnapshot{.artifact = kj::atomicRefcounted<jsg::SnapshotArtifact>()}));
+                jsg::MutableSnapshot{.artifact = kj::atomicRefcounted<jsg::SnapshotArtifact>()}),
+            // Only Workers without a memory limit take this path, so the zygote keeps the null
+            // enforcer.
+            kj::none);
     // Anything the zygote throws while compiling, evaluating or serializing only means this
     // Worker starts without a snapshot and evaluates its top level itself, printing what the
     // zygote's run only deferred.
@@ -1835,7 +1908,9 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
   }
 
   auto isolateStart = api::BenchTiming::now();
-  auto isolate = makeIsolate(impl->name, inspectorPolicy, kj::mv(snapshotConfig));
+  auto isolate = makeIsolate(impl->name, inspectorPolicy, kj::mv(snapshotConfig),
+      impl->isolateLimits.map(
+          [](kj::Own<VrtIsolateLimitState>& state) { return kj::atomicAddRef(*state); }));
   timing.isolate = since(isolateStart);
   KJ_IF_SOME(r, registrar) {
     r.registerIsolate(impl->name, *isolate);

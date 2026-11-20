@@ -102,6 +102,8 @@ pub struct LinkedChannels {
     pub tails: Vec<Rc<dyn Channel>>,
     pub streaming_tails: Vec<Rc<dyn Channel>>,
     pub worker_loaders: Vec<Rc<WorkerLoaderNamespace>>,
+    /// The owning worker's `limits` group: the ceiling for any worker it loads dynamically.
+    pub worker_limits: ffi::WorkerLimits,
     /// The subrequest channel whose props come from the request's Access blob.
     pub access_binding_channel: Option<u32>,
     pub has_debug_port: bool,
@@ -122,6 +124,9 @@ pub struct WorkerService {
     /// otherwise, since nothing else reads it and its bindings can be large, and for a dynamic
     /// worker.
     config_spec: Option<(u32, ffi::WorkerSpec)>,
+    /// The Worker's `limits` group: the ceiling for any worker it loads dynamically. For a
+    /// dynamic worker, the loading worker's `limits` group its `code.limits` was merged against.
+    config_limits: ffi::WorkerLimits,
     /// The default export's handlers, if the worker has a default export.
     default_handlers: Option<HashSet<String>>,
     /// Named exports with their handlers, in export order (loopback channels follow it).
@@ -145,6 +150,42 @@ pub struct WorkerService {
     /// Whether this worker rejects every request and actor construction because of config errors
     /// attributed to its deployment.
     broken: Cell<bool>,
+}
+
+/// The largest accepted value of each `Worker.limits` dimension. 0 means unlimited; a larger
+/// value is a config error rather than an unenforceable or overflowing budget.
+const MAX_WORKER_CPU_MS: u32 = 3_600_000; // one hour
+const MAX_WORKER_MEMORY_MB: u32 = 65_536; // 64 GiB
+const MAX_WORKER_SUBREQUESTS: u32 = 10_000_000; // Cloudflare's Standard configurability ceiling
+
+/// Reads and validates a config Worker's `limits` group. Errors are reported against the service
+/// and the offending dimension falls back to unlimited, so the worker is marked broken rather
+/// than silently running with a different budget.
+fn read_worker_limits(
+    name: &str,
+    conf: worker::Reader<'_>,
+    report: &Reporter,
+) -> ffi::WorkerLimits {
+    let read = |dimension: &str, value: u32, max: u32| -> u32 {
+        if value <= max {
+            value
+        } else {
+            report.service_error(
+                name,
+                format!(
+                    "Worker \"{name}\" limits.{dimension} is {value}, above the maximum of \
+                     {max}. Use 0 (the default) for unlimited."
+                ),
+            );
+            0
+        }
+    };
+    let limits = conf.get_limits();
+    ffi::WorkerLimits {
+        cpu_ms: read("cpuMs", limits.get_cpu_ms(), MAX_WORKER_CPU_MS),
+        memory_mb: read("memoryMb", limits.get_memory_mb(), MAX_WORKER_MEMORY_MB),
+        sub_requests: read("subRequests", limits.get_sub_requests(), MAX_WORKER_SUBREQUESTS),
+    }
 }
 
 impl WorkerService {
@@ -194,6 +235,7 @@ impl WorkerService {
             inbound_listeners,
             globals: std::mem::take(&mut bindings.globals),
             access_blob_header: access_blob_header.into(),
+            limits: read_worker_limits(name, conf, report),
         };
         let compiled = ffi::factory_new_worker(
             factory.raw(),
@@ -231,6 +273,7 @@ impl WorkerService {
         ffi::worker_set_ctx_exports(&compiled, &loopback.globals)?;
 
         let pending = pending_link(name, conf, bindings, loopback, report).map_err(capnp_error)?;
+        let config_limits = spec.limits;
         let config_spec = ffi::is_bench_mode().then_some((service_index, spec));
 
         let this = Rc::new(Self {
@@ -238,6 +281,7 @@ impl WorkerService {
             service_name: Some(name.to_owned()),
             worker: compiled,
             config_spec,
+            config_limits,
             default_handlers,
             named_entrypoints,
             actor_classes: info.actor_classes,
@@ -281,18 +325,24 @@ impl WorkerService {
     /// itself; the table here is the worker's own `ctx.exports`, numbered after them. A dynamic
     /// worker has no config, so no namespaces, no pending link and no name a token could carry;
     /// `name` is for error logs. Compilation errors fail the load rather than being reported.
+    ///
+    /// `limits` is the loading worker's `limits` group, which the factory merges with the
+    /// source's `code.limits` — the lower of the two wins — the standalone's equivalent of
+    /// Cloudflare's plan limits for a dynamically loaded worker.
     pub async fn new_dynamic(
         factory: Rc<Factory>,
         name: String,
         source: KjOwn<DynamicSource>,
         server: Weak<Server>,
         abort_isolate: Box<dyn Fn()>,
+        limits: ffi::WorkerLimits,
     ) -> Result<Rc<Self>> {
         let spec = ffi::WorkerSpec {
             name,
             inbound_listeners: Vec::new(),
             globals: Vec::new(),
             access_blob_header: KjMaybe::None,
+            limits,
         };
         let compiled =
             ffi::factory_new_worker(factory.raw(), &spec, KjMaybe::None, KjMaybe::Some(source))
@@ -334,6 +384,7 @@ impl WorkerService {
             service_name: None,
             worker: compiled,
             config_spec: None,
+            config_limits: spec.limits,
             default_handlers,
             named_entrypoints,
             actor_classes: info.actor_classes,
@@ -367,6 +418,7 @@ impl WorkerService {
                 tails: Vec::new(),
                 streaming_tails: Vec::new(),
                 worker_loaders: Vec::new(),
+                worker_limits: spec.limits,
                 access_binding_channel: None,
                 has_debug_port: false,
                 server,
@@ -479,6 +531,7 @@ impl WorkerService {
                 class_name: class_name.clone(),
                 props: None,
                 persistent: false,
+                limits: ffi::WorkerLimits::default(),
             });
             let namespace = ActorNamespace::new(
                 Rc::clone(&self.factory),
@@ -529,6 +582,12 @@ impl WorkerService {
     #[must_use]
     pub fn factory(&self) -> &Rc<Factory> {
         &self.factory
+    }
+
+    /// The Worker's `limits` group, which any worker it loads dynamically is capped by.
+    #[must_use]
+    pub fn config_limits(&self) -> ffi::WorkerLimits {
+        self.config_limits
     }
 
     /// The service's config name, which restores a stub to the worker. A dynamic worker has
@@ -638,13 +697,15 @@ impl WorkerService {
     /// The channel of an entrypoint (the default when `name` is `None`), with `props` bound.
     /// `None` when there is no such named entrypoint. A worker without a default export still
     /// yields a channel for the default entrypoint, whose requests fail: it is not a config
-    /// error, and configs depend on it.
+    /// error, and configs depend on it. `limits` is a `getEntrypoint()` options' limits, all
+    /// zero when the caller cannot pass one.
     #[must_use]
     pub fn entrypoint(
         self: &Rc<Self>,
         name: Option<&str>,
         props: Option<KjOwn<Frankenvalue>>,
         persistent: Persistent,
+        limits: ffi::WorkerLimits,
     ) -> Option<Rc<dyn Channel>> {
         let entrypoint = if let Some(name) = name {
             // A Durable Object class named as an entrypoint is accepted, with no handlers:
@@ -663,6 +724,7 @@ impl WorkerService {
             entrypoint,
             props,
             persistent,
+            limits,
         }))
     }
 
@@ -674,6 +736,7 @@ impl WorkerService {
             entrypoint: None,
             props: None,
             persistent: false,
+            limits: ffi::WorkerLimits::default(),
         })
     }
 
@@ -698,17 +761,20 @@ impl WorkerService {
             entrypoint: name.map(str::to_owned),
             props: None,
             persistent: false,
+            limits: ffi::WorkerLimits::default(),
         }))
     }
 
     /// The Durable Object class `name` with `props` bound; `None` when the worker exports no
-    /// such class (or `name` is `None`: a default export is never a class).
+    /// such class (or `name` is `None`: a default export is never a class). `limits` is a
+    /// `getDurableObjectClass()` options' limits, all zero when the caller cannot pass one.
     #[must_use]
     pub fn actor_class(
         self: &Rc<Self>,
         name: Option<&str>,
         props: Option<KjOwn<Frankenvalue>>,
         persistent: Persistent,
+        limits: ffi::WorkerLimits,
     ) -> Option<Rc<dyn ActorClass>> {
         let class_name = self
             .actor_classes
@@ -719,14 +785,16 @@ impl WorkerService {
             class_name: class_name.clone(),
             props,
             persistent,
+            limits,
         }))
     }
 
     /// The `ctx.exports` class of `name`: the template its props specialize.
     pub fn loopback_actor_class(self: &Rc<Self>, name: &str) -> Result<Rc<dyn ActorClass>> {
-        self.actor_class(Some(name), None, false).ok_or_else(|| {
-            kj::failed!("getLoopbackActorClass() called for actor class that doesn't exist")
-        })
+        self.actor_class(Some(name), None, false, ffi::WorkerLimits::default())
+            .ok_or_else(|| {
+                kj::failed!("getLoopbackActorClass() called for actor class that doesn't exist")
+            })
     }
 }
 
@@ -786,7 +854,8 @@ impl WorkerService {
 
     /// Starts a request on `entrypoint` (the default when `None`), on `actor` if the entrypoint
     /// is a Durable Object class. `is_tracer` marks a request that is itself a tail worker's,
-    /// which gets no tail workers of its own.
+    /// which gets no tail workers of its own. `entrypoint_limits` carries a `getEntrypoint()` /
+    /// `getDurableObjectClass()` options' limits, all zero when the caller cannot pass one.
     pub fn start_request(
         &self,
         entrypoint: Option<&str>,
@@ -794,6 +863,7 @@ impl WorkerService {
         actor: Option<&ffi::ActorHandle>,
         metadata: KjOwn<RequestMetadata>,
         is_tracer: bool,
+        entrypoint_limits: ffi::WorkerLimits,
     ) -> Result<KjOwn<WorkerInterface>> {
         if self.broken.get() {
             return Err(invalid_config_error());
@@ -816,6 +886,7 @@ impl WorkerService {
             Box::new(ChannelFactory(channels)),
             metadata,
             WorkerInterfaceList::new(tails),
+            entrypoint_limits,
         )
         .map_err(Into::into)
     }
@@ -855,8 +926,15 @@ impl WorkerService {
                     return Ok(None);
                 }
                 let props = target.props.map(ffi::frankenvalue_clone);
-                self.start_request(target.entrypoint, props, None, metadata, true)
-                    .map(Some)
+                self.start_request(
+                    target.entrypoint,
+                    props,
+                    None,
+                    metadata,
+                    true,
+                    ffi::WorkerLimits::default(),
+                )
+                .map(Some)
             }
             _ => tail.start_request(metadata).map(Some),
         }
@@ -891,6 +969,8 @@ struct EntrypointChannel {
     entrypoint: Option<String>,
     props: Option<KjOwn<Frankenvalue>>,
     persistent: Persistent,
+    /// A `getEntrypoint()`/`getDurableObjectClass()` options' limits; all zero otherwise.
+    limits: ffi::WorkerLimits,
 }
 
 impl Channel for EntrypointChannel {
@@ -903,8 +983,14 @@ impl Channel for EntrypointChannel {
         ffi::request_metadata_set_from_persistent_stub(metadata.as_mut(), self.persistent);
         // A template called without props runs with empty props.
         let props = self.props.as_deref().map(ffi::frankenvalue_clone);
-        self.worker
-            .start_request(self.entrypoint.as_deref(), props, None, metadata, false)
+        self.worker.start_request(
+            self.entrypoint.as_deref(),
+            props,
+            None,
+            metadata,
+            false,
+            self.limits,
+        )
     }
 
     fn require_allows_transfer(&self) -> Result<()> {
@@ -934,6 +1020,7 @@ impl Channel for EntrypointChannel {
             entrypoint: self.entrypoint.clone(),
             props: Some(props),
             persistent,
+            limits: self.limits,
         }))
     }
 
@@ -953,6 +1040,8 @@ struct ActorClassImpl {
     class_name: String,
     props: Option<KjOwn<Frankenvalue>>,
     persistent: Persistent,
+    /// A `getDurableObjectClass()` options' limits; all zero otherwise.
+    limits: ffi::WorkerLimits,
 }
 
 impl ActorClass for ActorClassImpl {
@@ -982,8 +1071,14 @@ impl ActorClass for ActorClassImpl {
         metadata: KjOwn<RequestMetadata>,
         actor: &ffi::ActorHandle,
     ) -> Result<KjOwn<WorkerInterface>> {
-        self.worker
-            .start_request(Some(&self.class_name), None, Some(actor), metadata, false)
+        self.worker.start_request(
+            Some(&self.class_name),
+            None,
+            Some(actor),
+            metadata,
+            false,
+            self.limits,
+        )
     }
 
     fn run_on_hibernate<'a>(
@@ -1041,6 +1136,7 @@ impl ActorClass for ActorClassImpl {
             class_name: self.class_name.clone(),
             props: Some(props),
             persistent,
+            limits: self.limits,
         }))
     }
 }
@@ -1181,7 +1277,11 @@ impl ChannelFactory {
             .worker_loaders
             .get(loader_channel as usize)
             .ok_or_else(|| kj::failed!("invalid worker loader channel number"))?;
-        Ok(Box::new(WorkerStub(loader.load(name.into(), source)?)))
+        Ok(Box::new(WorkerStub(loader.load(
+            name.into(),
+            source,
+            self.0.worker_limits,
+        )?)))
     }
 
     pub(crate) fn has_debug_port(&self) -> bool {

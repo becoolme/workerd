@@ -1247,6 +1247,31 @@ struct Worker {
 
   workflowsEngine @20 :WorkflowsEngine;
   # the externally-supplied service responsible for running Workflows defined in this worker
+
+  limits :group {
+    # Per-Worker resource limits. Every dimension defaults to 0, meaning "unlimited", which is
+    # the behavior of an unmodified workerd: the Worker then runs on the null limit enforcers.
+    #
+    # These limits are enforced by the standalone server (VRT fork) and are deliberately not part
+    # of the upstream configuration surface.
+
+    cpuMs @21 :UInt32;
+    # CPU budget per invocation, in milliseconds, accumulated from the thread CPU clock over the
+    # Worker's JavaScript turns. When exhausted, the isolate is terminated through V8 and the
+    # request fails as an exceeded-CPU error. Time spent awaiting I/O is not counted, and startup
+    # (top-level evaluation) is not limited.
+
+    memoryMb @22 :UInt32;
+    # V8 JavaScript heap budget for the Worker's isolate, in MiB. Exhausting it terminates the
+    # running invocation instead of aborting the process. This approximates Cloudflare's isolate
+    # memory limit: it covers the JavaScript heap, not native allocations or ArrayBuffer backing
+    # stores.
+
+    subRequests @23 :UInt32;
+    # Outbound subrequests per invocation. The (N+1)th subrequest throws `Error: Too many
+    # subrequests.` before it has any effect. Calls to services provided internally (KV, R2,
+    # actor storage, ...) are exempt, like Cloudflare's in-house subrequests.
+  }
 }
 
 struct ExternalServer {

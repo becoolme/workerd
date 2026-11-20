@@ -51,10 +51,10 @@ check.
 
 Keep our delta small and modular so sync conflicts stay rare:
 
-- limits live in `src/workerd/server/standalone-*.{h,c++}` and `thread-cpu-clock.*`
-  (self-contained, upstreamable);
-- the wiring is a handful of lines in `server.c++` / `worker-factory.c++` and a `limits`
-  field in `workerd.capnp`;
+- limits live in `src/workerd/server/vrt-limits.{h,c++}` (self-contained, including the thread CPU
+  clock and the cross-thread watchdog, so upstream syncs see new files rather than edits);
+- the wiring is a handful of lines in the Rust config path (`worker.rs`, `bridge.rs`), the factory
+  (`worker-factory.c++`) and a `limits` group in `workerd.capnp`;
 - avoid editing upstream's `.github/workflows/*` — configure the fork through the API instead
   (see "Disabled upstream automation").
 
@@ -140,7 +140,7 @@ setting "Allow GitHub Actions to create and approve pull requests" must stay ena
 
 | Patch | Files | Purpose |
 | --- | --- | --- |
-| `limits` (W2) | `src/workerd/server/standalone-*`, `thread-cpu-clock.*`, `limit-enforcer.h`, `workerd.capnp`, `server.c++`, `worker-factory.c++` | Per-Worker CPU / memory / subrequest / outbound-connection limits with Cloudflare's error semantics |
+| `limits` (W2) | `src/workerd/server/vrt-limits.{h,c++}`, `thread-*` helpers in the same file, `workerd.capnp`, `worker.rs`, `bridge.rs`, `loader.rs`, `config.rs`, `run.rs`, `worker-factory.c++` | Per-Worker CPU / memory / subrequest limits with Cloudflare's error semantics. Dynamically loaded Workers honor `WorkerCode.limits` and `getEntrypoint()`/`getDurableObjectClass()` `options.limits` (the documented lower-of-the-two merge), capped by the loading Worker's `limits` group |
 
 Anything that changes public behaviour must also be reflected in Vibeploy's
 `doc/platform/workers-runtime-quotas.md`.

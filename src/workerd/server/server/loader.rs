@@ -62,11 +62,13 @@ impl WorkerLoaderNamespace {
         })
     }
 
-    /// Loads (or, under a `name` already loaded, finds) a dynamic worker.
+    /// Loads (or, under a `name` already loaded, finds) a dynamic worker. `limits` is the
+    /// loading worker's `limits` group, the ceiling the source's `code.limits` may tighten.
     pub fn load(
         self: &Rc<Self>,
         name: Option<&str>,
         source: KjOwn<DynamicSource>,
+        limits: ffi::WorkerLimits,
     ) -> Result<Rc<WorkerStub>> {
         let server = self
             .server
@@ -92,6 +94,7 @@ impl WorkerLoaderNamespace {
                     format!("{}:{name}", self.name),
                     source,
                     Some(on_abort),
+                    limits,
                 );
                 self.isolates
                     .borrow_mut()
@@ -104,6 +107,7 @@ impl WorkerLoaderNamespace {
                 format!("{}:dynamic:{:032x}", self.name, rand::random::<u128>()),
                 source,
                 None,
+                limits,
             ),
         };
 
@@ -139,13 +143,15 @@ pub struct WorkerStub {
 impl WorkerStub {
     /// `on_abort` runs (once) when the worker aborts its isolate; a named stub uses it to leave
     /// its namespace. The stub's startup compiles the worker from its source (which the factory
-    /// fetches) and links it.
+    /// fetches) and links it. `limits` is the loading worker's `limits` group, the ceiling the
+    /// source's `code.limits` may tighten.
     fn new(
         factory: Rc<Factory>,
         server: Weak<Server>,
         isolate_name: String,
         source: KjOwn<DynamicSource>,
         on_abort: Option<Box<dyn Fn()>>,
+        limits: ffi::WorkerLimits,
     ) -> Rc<Self> {
         let fired = Cell::new(false);
         let abort_isolate: Box<dyn Fn()> = Box::new(move || {
@@ -156,10 +162,16 @@ impl WorkerStub {
                 on_abort();
             }
         });
-        let startup =
-            WorkerService::new_dynamic(factory, isolate_name, source, server, abort_isolate)
-                .boxed_local()
-                .shared();
+        let startup = WorkerService::new_dynamic(
+            factory,
+            isolate_name,
+            source,
+            server,
+            abort_isolate,
+            limits,
+        )
+        .boxed_local()
+        .shared();
         Rc::new(Self {
             startup,
             unlinked: Cell::new(false),
@@ -211,11 +223,13 @@ impl crate::channels::WorkerStub {
         &self,
         name: KjMaybe<&str>,
         props: KjOwn<Frankenvalue>,
+        limits: ffi::WorkerLimits,
     ) -> Box<SubrequestChannel> {
         SubrequestChannel::new(Rc::new(DynamicEntrypoint {
             stub: Rc::clone(&self.0),
             name: Option::<&str>::from(name).map(str::to_owned),
             props,
+            limits,
         }))
     }
 
@@ -223,11 +237,13 @@ impl crate::channels::WorkerStub {
         &self,
         name: KjMaybe<&str>,
         props: KjOwn<Frankenvalue>,
+        limits: ffi::WorkerLimits,
     ) -> Box<ActorClassChannel> {
         ActorClassChannel::new(Rc::new(DynamicActorClass {
             stub: Rc::clone(&self.0),
             name: Option::<&str>::from(name).map(str::to_owned),
             props,
+            limits,
         }))
     }
 }
@@ -247,18 +263,20 @@ struct DynamicEntrypoint {
     /// `None` is the default entrypoint.
     name: Option<String>,
     props: KjOwn<Frankenvalue>,
+    /// The `getEntrypoint()` options' limits; the lower of them and the Worker's own applies.
+    limits: ffi::WorkerLimits,
 }
 
 impl Channel for DynamicEntrypoint {
     fn start_request(&self, metadata: KjOwn<RequestMetadata>) -> Result<KjOwn<WorkerInterface>> {
         let (stub, name) = (Rc::clone(&self.stub), self.name.clone());
-        let props = ffi::frankenvalue_clone(&self.props);
+        let (props, limits) = (ffi::frankenvalue_clone(&self.props), self.limits);
         // Starts the request on the started worker. The request keeps the stub alive until it
         // is done: the stub's drop unlinks the worker, which a request in flight must not see.
         let start = move || -> Result<KjOwn<WorkerInterface>> {
             let channel = stub
                 .service()?
-                .entrypoint(name.as_deref(), Some(props), false)
+                .entrypoint(name.as_deref(), Some(props), false, limits)
                 .ok_or_else(|| match &name {
                     Some(name) => kj::failed!("jsg.Error: Worker has no such entrypoint: {name}"),
                     None => kj::failed!("jsg.Error: Worker has no default entrypoint."),
@@ -290,6 +308,9 @@ struct DynamicActorClass {
     stub: Rc<WorkerStub>,
     name: Option<String>,
     props: KjOwn<Frankenvalue>,
+    /// The `getDurableObjectClass()` options' limits; the lower of them and the Worker's own
+    /// applies.
+    limits: ffi::WorkerLimits,
 }
 
 impl DynamicActorClass {
@@ -300,7 +321,7 @@ impl DynamicActorClass {
         })?;
         let props = ffi::frankenvalue_clone(&self.props);
         service
-            .actor_class(self.name.as_deref(), Some(props), false)
+            .actor_class(self.name.as_deref(), Some(props), false, self.limits)
             .ok_or_else(|| match &self.name {
                 Some(name) => kj::failed!("jsg.Error: Worker has no such actor class: {name}"),
                 None => kj::failed!("jsg.Error: Worker has no default actor class."),

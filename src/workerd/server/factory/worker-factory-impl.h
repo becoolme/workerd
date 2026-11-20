@@ -14,6 +14,7 @@
 #include <workerd/server/container-client.h>
 #include <workerd/server/facet-tree-index.h>
 #include <workerd/server/server/bridge.rs.h>
+#include <workerd/server/vrt-limits.h>
 
 #include <capnp/rpc-twoparty.h>
 #include <capnp/serialize.h>
@@ -194,6 +195,14 @@ class CompiledWorker::Impl final: public kj::Refcounted, private kj::TaskSet::Er
   kj::Vector<kj::Rc<IoChannelFactory::RpcChannel>> rpcChannels;
   kj::Maybe<kj::String> accessBlobHeader;
   bool isDynamic = false;
+
+  // The Worker's own limits: the config's `limits` group, or for a dynamic Worker the lower of
+  // its `code.limits` and the loading Worker's `limits` group. All zero is "unlimited".
+  VrtWorkerLimits limits;
+  // The isolate-level limit state shared with this Worker's request enforcers; none for an
+  // unlimited config Worker. Always set for a dynamic Worker: `getEntrypoint(name, {limits})`
+  // may put a limit on it at request time, and CPU enforcement needs the state's liveness.
+  kj::Maybe<kj::Own<VrtIsolateLimitState>> isolateLimits;
 
   kj::Maybe<kj::Own<const Worker>> worker;
   // Held from compilation until `worker_set_ctx_exports()` fills the object in; none for a worker

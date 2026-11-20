@@ -1,0 +1,26 @@
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "worker-loader-vrt-limits-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "worker-loader-vrt-limits-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat","rpc","enable_ctx_exports","experimental"],
+        bindings = [
+          (name = "loader", workerLoader = ()),
+        ],
+        durableObjectNamespaces = [
+          (className = "FacetHost", uniqueKey = "FacetHost"),
+        ],
+        durableObjectStorage = (inMemory = void),
+        globalOutbound = (name = "worker-loader-vrt-limits-test", entrypoint = "echoOutbound"),
+        # The loading Worker's limits are the ceiling for every Worker it loads: a dynamic
+        # Worker's `code.limits` may tighten them but never exceed them. memoryMb is the
+        # ceiling dimension the JS-facing `ResourceLimits` cannot even express.
+        limits = (memoryMb = 96),
+      )
+    ),
+  ],
+);

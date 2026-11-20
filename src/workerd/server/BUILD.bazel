@@ -179,6 +179,27 @@ wd_cc_library(
 )
 
 wd_cc_library(
+    name = "vrt-limits",
+    srcs = ["vrt-limits.c++"],
+    hdrs = ["vrt-limits.h"],
+    # VRT fork: the standalone server's per-Worker CPU / memory / subrequest limits. Kept separate
+    # from the I/O core so upstream syncs only conflict on the wiring call sites.
+    visibility = ["//src/workerd/server:__subpackages__"],
+    deps = [
+        "//src/workerd/io",
+        "//src/workerd/io:limit-enforcer",
+        "//src/workerd/io:outcome_capnp",
+        "//src/workerd/io:tracked-wasm-instance",
+        "//src/workerd/jsg",
+        "//src/workerd/jsg:exception",
+        "//src/workerd/util:exception",
+        "@capnp-cpp//src/kj",
+        "@capnp-cpp//src/kj:kj-async-core",
+        "@workerd-v8//:v8",
+    ],
+)
+
+wd_cc_library(
     name = "workerd-debug-port-client",
     srcs = [
         "workerd-debug-port-client.c++",
@@ -441,6 +462,17 @@ kj_test(
         "//src/workerd/util:thread-scopes",
         "@capnp-cpp//src/kj",
         "@ssl",
+    ],
+)
+
+kj_test(
+    src = "vrt-limits-test.c++",
+    deps = [
+        ":vrt-limits",
+        "//src/workerd/io:limit-enforcer",
+        "//src/workerd/util:exception",
+        "@capnp-cpp//src/kj",
+        "@capnp-cpp//src/kj:kj-async-core",
     ],
 )
 

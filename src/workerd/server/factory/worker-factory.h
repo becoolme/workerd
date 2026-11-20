@@ -50,6 +50,9 @@ namespace workerd::server {
 
 // Rust types of the bridge, defined in server/channels.rs and server/tasks.rs.
 struct ServerHandle;
+// Defined in server/bridge.rs; only ever passed by value through this header, so a forward
+// declaration is enough for callers that never construct one.
+struct WorkerLimits;
 struct ChannelFactory;
 struct SubrequestChannel;
 struct SpawnedTask;
@@ -252,7 +255,8 @@ kj::Own<WorkerInterface> worker_start_request(const CompiledWorker& worker,
     kj::Maybe<const ActorHandle&> actor,
     ::rust::Box<ChannelFactory> channels,
     kj::Own<RequestMetadata> metadata,
-    ::rust::Box<WorkerInterfaceList> tails);
+    ::rust::Box<WorkerInterfaceList> tails,
+    WorkerLimits entrypointLimits);
 kj::Promise<void> worker_run_actor_on_hibernate(const CompiledWorker& worker,
     const ActorHandle& actor,
     ::rust::Str className,
