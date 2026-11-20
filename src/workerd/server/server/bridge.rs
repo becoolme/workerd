@@ -123,6 +123,14 @@ pub mod ffi {
         env_actor_classes: u32,
     }
 
+    /// The `limits` group of a config Worker: per-invocation CPU and subrequest budgets plus the
+    /// isolate heap budget. Every field is 0 when the dimension is unlimited.
+    struct WorkerLimits {
+        cpu_ms: u32,
+        memory_mb: u32,
+        sub_requests: u32,
+    }
+
     struct WorkerSpec {
         name: String,
         /// The worker's inbound TCP listeners, for `Worker::Api::getInboundListeners()`.
@@ -133,6 +141,8 @@ pub mod ffi {
         /// `accessBlobHeader`, when set: requests carrying this header have it parsed into the
         /// request's access info.
         access_blob_header: KjMaybe<String>,
+        /// The Worker's configured resource limits; all zero for dynamic workers.
+        limits: WorkerLimits,
     }
 
     /// A header the rewriter sets to `value`, or removes when it has none. `name` is a header

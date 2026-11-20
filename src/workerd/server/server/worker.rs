@@ -147,6 +147,42 @@ pub struct WorkerService {
     broken: Cell<bool>,
 }
 
+/// The largest accepted value of each `Worker.limits` dimension. 0 means unlimited; a larger
+/// value is a config error rather than an unenforceable or overflowing budget.
+const MAX_WORKER_CPU_MS: u32 = 3_600_000; // one hour
+const MAX_WORKER_MEMORY_MB: u32 = 65_536; // 64 GiB
+const MAX_WORKER_SUBREQUESTS: u32 = 10_000_000; // Cloudflare's Standard configurability ceiling
+
+/// Reads and validates a config Worker's `limits` group. Errors are reported against the service
+/// and the offending dimension falls back to unlimited, so the worker is marked broken rather
+/// than silently running with a different budget.
+fn read_worker_limits(
+    name: &str,
+    conf: worker::Reader<'_>,
+    report: &Reporter,
+) -> ffi::WorkerLimits {
+    let read = |dimension: &str, value: u32, max: u32| -> u32 {
+        if value <= max {
+            value
+        } else {
+            report.service_error(
+                name,
+                format!(
+                    "Worker \"{name}\" limits.{dimension} is {value}, above the maximum of \
+                     {max}. Use 0 (the default) for unlimited."
+                ),
+            );
+            0
+        }
+    };
+    let limits = conf.get_limits();
+    ffi::WorkerLimits {
+        cpu_ms: read("cpuMs", limits.get_cpu_ms(), MAX_WORKER_CPU_MS),
+        memory_mb: read("memoryMb", limits.get_memory_mb(), MAX_WORKER_MEMORY_MB),
+        sub_requests: read("subRequests", limits.get_sub_requests(), MAX_WORKER_SUBREQUESTS),
+    }
+}
+
 impl WorkerService {
     /// Compiles the worker `conf` (the config's service `service_index`, named `name`) and
     /// prepares its link. Config errors are reported, not returned: a worker with errors still
@@ -194,6 +230,7 @@ impl WorkerService {
             inbound_listeners,
             globals: std::mem::take(&mut bindings.globals),
             access_blob_header: access_blob_header.into(),
+            limits: read_worker_limits(name, conf, report),
         };
         let compiled = ffi::factory_new_worker(
             factory.raw(),
@@ -293,6 +330,11 @@ impl WorkerService {
             inbound_listeners: Vec::new(),
             globals: Vec::new(),
             access_blob_header: KjMaybe::None,
+            limits: ffi::WorkerLimits {
+                cpu_ms: 0,
+                memory_mb: 0,
+                sub_requests: 0,
+            },
         };
         let compiled =
             ffi::factory_new_worker(factory.raw(), &spec, KjMaybe::None, KjMaybe::Some(source))
