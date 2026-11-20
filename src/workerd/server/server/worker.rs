@@ -531,6 +531,7 @@ impl WorkerService {
                 class_name: class_name.clone(),
                 props: None,
                 persistent: false,
+                limits: ffi::WorkerLimits::default(),
             });
             let namespace = ActorNamespace::new(
                 Rc::clone(&self.factory),
