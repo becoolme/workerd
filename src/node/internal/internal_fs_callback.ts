@@ -24,6 +24,7 @@
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 import * as fssync from 'node-internal:internal_fs_sync';
 import { default as cffs } from 'cloudflare-internal:filesystem';
+import { getPathFromURLPosix } from 'node-internal:internal_url';
 import { isStdioFd, writeStdio } from 'node-internal:internal_fs_stdio';
 import type {
   FStatOptions,
@@ -211,7 +212,9 @@ export function chmod(
   const { pathOrFd } = validateChmodArgs(path, mode);
   callWithErrorOnlyCallback(() => {
     if (cffs.stat(pathOrFd as URL, { followSymlinks: true }) == null) {
-      throw new ERR_ENOENT((pathOrFd as URL).pathname, { syscall: 'chmod' });
+      throw new ERR_ENOENT(getPathFromURLPosix(pathOrFd as URL), {
+        syscall: 'chmod',
+      });
     }
   }, callback);
 }
@@ -225,7 +228,9 @@ export function chown(
   const { pathOrFd } = validateChownArgs(path, uid, gid);
   callWithErrorOnlyCallback(() => {
     if (cffs.stat(pathOrFd as URL, { followSymlinks: true }) == null) {
-      throw new ERR_ENOENT((pathOrFd as URL).pathname, { syscall: 'chown' });
+      throw new ERR_ENOENT(getPathFromURLPosix(pathOrFd as URL), {
+        syscall: 'chown',
+      });
     }
   }, callback);
 }
@@ -268,8 +273,8 @@ export function copyFile(
   if (mode & COPYFILE_EXCL && fssync.existsSync(dest)) {
     throw new ERR_EEXIST({
       syscall: 'copyFile',
-      path: normalizedSrc.pathname,
-      dest: normalizedDest.pathname,
+      path: getPathFromURLPosix(normalizedSrc),
+      dest: getPathFromURLPosix(normalizedDest),
     });
   }
 
@@ -459,7 +464,9 @@ export function lchmod(
   const { pathOrFd } = validateChmodArgs(path, mode);
   callWithErrorOnlyCallback(() => {
     if (cffs.stat(pathOrFd as URL, { followSymlinks: false }) == null) {
-      throw new ERR_ENOENT((pathOrFd as URL).pathname, { syscall: 'lchmod' });
+      throw new ERR_ENOENT(getPathFromURLPosix(pathOrFd as URL), {
+        syscall: 'lchmod',
+      });
     }
   }, callback);
 }
@@ -473,7 +480,9 @@ export function lchown(
   const { pathOrFd } = validateChownArgs(path, uid, gid);
   callWithErrorOnlyCallback(() => {
     if (cffs.stat(pathOrFd as URL, { followSymlinks: false }) == null) {
-      throw new ERR_ENOENT((pathOrFd as URL).pathname, { syscall: 'lchown' });
+      throw new ERR_ENOENT(getPathFromURLPosix(pathOrFd as URL), {
+        syscall: 'lchown',
+      });
     }
   }, callback);
 }
