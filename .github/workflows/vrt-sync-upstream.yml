@@ -52,6 +52,22 @@ jobs:
           git config user.name "vrt-sync-bot"
           git config user.email "vrt-sync-bot@users.noreply.github.com"
 
+      # A PR authored by `github-actions[bot]` is treated as untrusted: GitHub parks its
+      # `pull_request` run in `action_required` until a maintainer approves it, every week.
+      # Opening the PR with a user token avoids that, and lets the normal `pull_request` build
+      # run without our extra dispatch.
+      - name: Check for a user token
+        id: auth
+        env:
+          SYNC_TOKEN: ${{ secrets.VRT_SYNC_TOKEN }}
+        run: |
+          if [ -n "$SYNC_TOKEN" ]; then
+            echo "pat=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "pat=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::VRT_SYNC_TOKEN is not set; the sync PR will be opened by github-actions[bot] and need manual run approval."
+          fi
+
       - name: Fetch upstream
         id: upstream
         run: |
@@ -105,7 +121,7 @@ jobs:
         id: pr
         if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.VRT_SYNC_TOKEN || github.token }}
           BRANCH: ${{ steps.merge.outputs.branch }}
           UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
           BEHIND: ${{ steps.behind.outputs.behind }}
@@ -153,7 +169,7 @@ jobs:
       # A PR opened with GITHUB_TOKEN does not trigger pull_request workflows (GitHub's
       # recursion guard), so start the build explicitly. Its checks attach to the branch head.
       - name: Dispatch build
-        if: steps.pr.outputs.number != ''
+        if: steps.pr.outputs.number != '' && steps.auth.outputs.pat != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.merge.outputs.branch }}
@@ -190,7 +206,7 @@ jobs:
       - name: Open conflict PR
         if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'false'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.VRT_SYNC_TOKEN || github.token }}
           BRANCH: ${{ steps.merge.outputs.branch }}
           UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
         run: |

@@ -38,9 +38,16 @@ use the `VRT sync upstream` workflow instead.
 A conflict PR is resolved by a human (web editor or locally, see the PR body). The sync job
 never commits conflict markers and never force-pushes `vrt`.
 
-Because a PR opened with `GITHUB_TOKEN` does not trigger `pull_request` workflows, the sync
-job starts `VRT build` with `workflow_dispatch`. If that dispatch is skipped (older runs), run
-it by hand from the Actions tab for the sync branch.
+PRs opened with `GITHUB_TOKEN` are authored by `github-actions[bot]`, which GitHub treats as
+untrusted: the `pull_request` run lands in `action_required` and a maintainer has to approve it
+every week. Set a fine-grained PAT secret named `VRT_SYNC_TOKEN` (Contents: read/write, Pull
+requests: read/write, limited to this repository) and the PR is opened as that user instead:
+no approval prompt, and the normal `pull_request` build runs on its own.
+
+Without the secret the job falls back to `GITHUB_TOKEN`: it opens the PR, and additionally
+dispatches `VRT build` (the bot's own `pull_request` run is skipped by the build workflow).
+The PR then shows an `action_required` run that can be ignored; the dispatched run is the real
+check.
 
 Keep our delta small and modular so sync conflicts stay rare:
 
