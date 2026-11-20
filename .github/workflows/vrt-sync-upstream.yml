@@ -35,6 +35,10 @@ jobs:
   sync:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # The checkout has an `upstream` remote too; without this gh resolves the repository
+      # from that remote and tries to create labels on cloudflare/workerd.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Checkout vrt
         uses: actions/checkout@v7
@@ -107,7 +111,7 @@ jobs:
           BEHIND: ${{ steps.behind.outputs.behind }}
         run: |
           set -euo pipefail
-          gh label create sync --color 1D76DB --description "Upstream workerd sync" --force >/dev/null
+          gh label create sync --repo "$GH_REPO" --color 1D76DB --description "Upstream workerd sync" --force >/dev/null
           body=$(cat <<EOF
           Weekly merge of \`cloudflare/workerd@${UPSTREAM_SHA}\` into \`vrt\`.
 
@@ -120,13 +124,13 @@ jobs:
           builds, see FORK.md).
           EOF
           )
-          if pr=$(gh pr list --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
-            gh pr comment "$pr" --body "Re-ran the sync; branch updated to $(git rev-parse HEAD)."
+          if pr=$(gh pr list --repo "$GH_REPO" --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
+            gh pr comment --repo "$GH_REPO" "$pr" --body "Re-ran the sync; branch updated to $(git rev-parse HEAD)."
             echo "number=$pr" >> "$GITHUB_OUTPUT"
-          elif url=$(gh pr create --base vrt --head "$BRANCH" \
+          elif url=$(gh pr create --repo "$GH_REPO" --base vrt --head "$BRANCH" \
               --title "chore: sync workerd upstream $(git rev-parse --short=12 "$UPSTREAM_SHA")" \
               --body "$body" --label sync 2>/tmp/pr-error.txt); then
-            gh pr comment "$url" --body "Kicking off \`VRT build\` for the merge commit."
+            gh pr comment --repo "$GH_REPO" "$url" --body "Kicking off \`VRT build\` for the merge commit."
             echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
           else
             # GITHUB_TOKEN can only open PRs when the organization allows it. The branch is
@@ -156,7 +160,7 @@ jobs:
         run: |
           # workflow_dispatch is exempt from GitHub's push/PR recursion guard, so the bot can
           # start the build even though its PR did not fire a pull_request event.
-          gh workflow run vrt-build.yml --ref "$BRANCH" || {
+          gh workflow run vrt-build.yml --repo "$GH_REPO" --ref "$BRANCH" || {
             echo "::warning::Could not dispatch VRT build; run it from the Actions tab."
           }
 
@@ -191,7 +195,7 @@ jobs:
           UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
         run: |
           set -euo pipefail
-          gh label create sync-conflict --color B60205 --description "Upstream sync needs manual conflict resolution" --force >/dev/null
+          gh label create sync-conflict --repo "$GH_REPO" --color B60205 --description "Upstream sync needs manual conflict resolution" --force >/dev/null
           body=$(cat <<EOF
           Automated merge of \`cloudflare/workerd@${UPSTREAM_SHA}\` into \`vrt\` **conflicts**.
 
@@ -216,11 +220,11 @@ jobs:
           conflict is gone.
           EOF
           )
-          if pr=$(gh pr list --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
-            gh pr comment "$pr" --body "Sync re-ran; still conflicting."
+          if pr=$(gh pr list --repo "$GH_REPO" --base vrt --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -v '^$'); then
+            gh pr comment --repo "$GH_REPO" "$pr" --body "Sync re-ran; still conflicting."
             echo "number=$pr" >> "$GITHUB_OUTPUT"
           else
-            gh pr create --base vrt --head "$BRANCH" \
+            gh pr create --repo "$GH_REPO" --base vrt --head "$BRANCH" \
               --title "chore: sync workerd upstream $(git rev-parse --short=12 "$UPSTREAM_SHA") (conflicts)" \
               --body "$body" --label sync --label sync-conflict
           fi
