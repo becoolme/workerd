@@ -245,9 +245,12 @@ pub async fn bind_sockets(
             let socket = match bind_udp(&address, default_port_for(sock)).await {
                 Ok(socket) => socket,
                 Err(e) => {
+                    // VRT: a socket that cannot bind is fatal even under `--watch`
+                    // (upstream tolerates it for dev-mode config recovery, but a
+                    // bind failure is not fixable by editing the config: a
+                    // re-exec'd image that stayed alive would serve nothing).
                     report.error(format!("Socket \"{name}\": {}", e.description()));
-                    bound.sockets.push(None);
-                    continue;
+                    return Err(e);
                 }
             };
             bound
@@ -263,9 +266,12 @@ pub async fn bind_sockets(
         let listener = match listener {
             Ok(listener) => listener,
             Err(e) => {
+                // VRT: a socket that cannot bind is fatal even under `--watch`
+                // (upstream tolerates it for dev-mode config recovery, but a
+                // bind failure is not fixable by editing the config: a
+                // re-exec'd image that stayed alive would serve nothing).
                 report.error(format!("Socket \"{name}\": {}", e.description()));
-                bound.sockets.push(None);
-                continue;
+                return Err(e);
             }
         };
 
