@@ -149,7 +149,7 @@ impl WorkerLoaderNamespace {
     fn check_quota(&self, what: &str) -> Result<()> {
         if self.max_workers != 0 && self.live.get() >= self.max_workers as usize {
             return Err(kj::failed!(
-                "worker loader '{}' cannot load {what}: the limit of {} live workers is reached",
+                "jsg.Error: worker loader '{}' cannot load {what}: the limit of {} live workers is reached",
                 self.name,
                 self.max_workers,
             ));
