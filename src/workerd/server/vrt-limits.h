@@ -243,7 +243,7 @@ class VrtLimitEnforcer final: public LimitEnforcer, public kj::Refcounted {
   void topUpActor() override;
   void newSubrequest(bool isInHouse) override;
   void newKvRequest(KvOpType) override {}
-  void newAnalyticsEngineRequest() override {}
+  void newAnalyticsEngineRequest() override;
   kj::Promise<void> limitDrain() override;
   kj::Promise<void> limitScheduled() override;
   kj::Duration getAlarmLimit() override;
@@ -278,6 +278,7 @@ class VrtLimitEnforcer final: public LimitEnforcer, public kj::Refcounted {
   // invocation (IoContext cannot switch threads, and only one thread locks an isolate at a time).
   kj::Duration cpuUsed = 0 * kj::SECONDS;
   uint32_t subrequestsUsed = 0;
+  uint32_t aeEventsUsed = 0;
   uint32_t jsScopeDepth = 0;
   kj::Maybe<kj::Duration> jsStart;
   kj::Maybe<VrtLimitWatchdog::Token> token;

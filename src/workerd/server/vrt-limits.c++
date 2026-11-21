@@ -468,6 +468,7 @@ void VrtLimitEnforcer::topUpActor() {
   throwIfExceeded();
   cpuUsed = 0 * kj::SECONDS;
   subrequestsUsed = 0;
+  aeEventsUsed = 0;
   invocation->reset();
   isolateState->clearHeapLimit();
 }
@@ -482,6 +483,17 @@ void VrtLimitEnforcer::newSubrequest(bool isInHouse) {
     JSG_FAIL_REQUIRE(Error, "Too many subrequests.");
   }
   ++subrequestsUsed;
+}
+
+void VrtLimitEnforcer::newAnalyticsEngineRequest() {
+  throwIfExceeded();
+  // Cloudflare caps writeDataPoint at 250 data points per invocation; the
+  // budget is fixed there (no config knob), so mirror it as a constant.
+  // https://developers.cloudflare.com/analytics/analytics-engine/limits/
+  if (aeEventsUsed >= 250) {
+    JSG_FAIL_REQUIRE(Error, "Too many Analytics Engine data points.");
+  }
+  ++aeEventsUsed;
 }
 
 kj::Promise<void> VrtLimitEnforcer::limitDrain() {
