@@ -1,0 +1,34 @@
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "k2-api-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "k2-api-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat"],
+        bindings = [
+        (
+          name = "K2",
+          wrapped = (
+            moduleName = "cloudflare-internal:k2",
+            innerBindings = [(
+              name = "fetcher",
+              service = (name = "k2-mock")
+            )],
+          )
+        ),
+        ]
+      )
+    ),
+    ( name = "k2-mock",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "k2-mock.js")
+        ],
+        compatibilityFlags = ["nodejs_compat"]
+      )
+    ),
+  ]
+);
