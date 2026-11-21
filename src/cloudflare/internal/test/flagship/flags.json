@@ -1,0 +1,229 @@
+{
+  "appId": "app-test",
+  "accountTag": "acct-test",
+  "flags": {
+    "simple-bool": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": []
+    },
+    "disabled-flag": {
+      "enabled": false,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            { "attribute": "plan", "operator": "equals", "value": "ent" }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "plan-gated": {
+      "enabled": true,
+      "type": "string",
+      "defaultVariant": "basic",
+      "variants": { "pro": "pro-copy", "basic": "basic-copy" },
+      "rules": [
+        {
+          "conditions": [
+            { "attribute": "plan", "operator": "equals", "value": "ent" }
+          ],
+          "serve_variation": "pro"
+        }
+      ]
+    },
+    "rollout-100": {
+      "enabled": true,
+      "type": "string",
+      "defaultVariant": "off",
+      "variants": { "on": "in", "off": "out" },
+      "rules": [
+        { "serve_variation": "on", "rollout": { "percentage": 100 } }
+      ]
+    },
+    "rollout-0": {
+      "enabled": true,
+      "type": "string",
+      "defaultVariant": "off",
+      "variants": { "on": "in", "off": "out" },
+      "rules": [
+        { "serve_variation": "on", "rollout": { "percentage": 0 } }
+      ]
+    },
+    "rollout-attr": {
+      "enabled": true,
+      "type": "string",
+      "defaultVariant": "off",
+      "variants": { "on": "in", "off": "out" },
+      "rules": [
+        {
+          "serve_variation": "on",
+          "rollout": { "percentage": 100, "attribute": "userId" }
+        }
+      ]
+    },
+    "nested-path": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            {
+              "attribute": "profile.plan",
+              "operator": "equals",
+              "value": "ent"
+            }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "literal-key": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            { "attribute": "a.b", "operator": "equals", "value": "lit" }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "num-gt": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            { "attribute": "age", "operator": "greater_than", "value": 18 }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "date-gt": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            {
+              "attribute": "since",
+              "operator": "greater_than",
+              "value": "2026-01-01T00:00:00Z"
+            }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "in-op": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            {
+              "attribute": "plan",
+              "operator": "in",
+              "value": ["ent", "biz"]
+            }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "has-op": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            { "attribute": "tags", "operator": "has", "value": "vip" }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "contains-op": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": [
+            {
+              "attribute": "email",
+              "operator": "contains",
+              "value": "@corp.com"
+            }
+          ],
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "grouped": {
+      "enabled": true,
+      "type": "boolean",
+      "defaultVariant": "off",
+      "variants": { "on": true, "off": false },
+      "rules": [
+        {
+          "conditions": {
+            "all": [
+              { "attribute": "plan", "operator": "equals", "value": "ent" },
+              {
+                "any": [
+                  {
+                    "attribute": "region",
+                    "operator": "equals",
+                    "value": "us"
+                  },
+                  {
+                    "attribute": "region",
+                    "operator": "equals",
+                    "value": "eu"
+                  }
+                ]
+              }
+            ]
+          },
+          "serve_variation": "on"
+        }
+      ]
+    },
+    "number-flag": {
+      "enabled": true,
+      "type": "number",
+      "defaultVariant": "d",
+      "variants": { "d": 42, "h": 100 },
+      "rules": []
+    },
+    "json-flag": {
+      "enabled": true,
+      "type": "json",
+      "defaultVariant": "d",
+      "variants": { "d": { "theme": "dark" }, "l": { "theme": "light" } },
+      "rules": []
+    }
+  }
+}

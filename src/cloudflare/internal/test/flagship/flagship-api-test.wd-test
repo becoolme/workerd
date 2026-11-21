@@ -1,0 +1,46 @@
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "flagship-api-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "flagship-api-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat"],
+        bindings = [
+        (
+          name = "FLAGS",
+          wrapped = (
+            moduleName = "cloudflare-internal:flagship",
+            innerBindings = [(
+              name = "config",
+              json = embed "flags.json"
+            )],
+          )
+        ),
+        (
+          name = "EMPTY",
+          wrapped = (
+            moduleName = "cloudflare-internal:flagship",
+            innerBindings = [(
+              name = "config",
+              json = "{ \"flags\": {} }"
+            )],
+          )
+        ),
+        (
+          name = "NEG",
+          wrapped = (
+            moduleName = "cloudflare-internal:flagship",
+            innerBindings = [(
+              name = "config",
+              json = "{ \"flags\": { \"f\": { \"enabled\": true, \"type\": \"boolean\", \"defaultVariant\": \"off\", \"variants\": { \"on\": true, \"off\": false }, \"rules\": [ { \"conditions\": [ { \"attribute\": \"x\", \"operator\": \"not_equals\", \"value\": \"v\" } ], \"serve_variation\": \"on\" } ] } } }"
+            )],
+          )
+        )
+        ],
+      )
+    ),
+  ]
+);
