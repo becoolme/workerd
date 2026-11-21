@@ -1,0 +1,34 @@
+using Workerd = import "/workerd/workerd.capnp";
+
+const unitTests :Workerd.Config = (
+  services = [
+    ( name = "send-email-api-test",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "send-email-api-test.js")
+        ],
+        compatibilityFlags = ["nodejs_compat"],
+        bindings = [
+        (
+          name = "EMAIL",
+          wrapped = (
+            moduleName = "cloudflare-internal:send-email",
+            innerBindings = [(
+              name = "fetcher",
+              service = (name = "send-email-mock")
+            )],
+          )
+        ),
+        ]
+      )
+    ),
+    ( name = "send-email-mock",
+      worker = (
+        modules = [
+          (name = "worker", esModule = embed "send-email-mock.js")
+        ],
+        compatibilityFlags = ["nodejs_compat"]
+      )
+    ),
+  ]
+);
