@@ -16,6 +16,10 @@
 
 import wrappedBinding from 'cloudflare-internal:wrapped-binding';
 
+interface Fetcher {
+  fetch: typeof fetch;
+}
+
 interface EmailAddress {
   email: string;
   name?: string;

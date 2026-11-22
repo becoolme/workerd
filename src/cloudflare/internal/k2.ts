@@ -14,6 +14,10 @@
 
 import wrappedBinding from 'cloudflare-internal:wrapped-binding';
 
+interface Fetcher {
+  fetch: typeof fetch;
+}
+
 interface K2Record {
   content: string | ArrayBuffer | ArrayBufferView;
   headers?: Record<string, string>;
