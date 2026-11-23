@@ -34,6 +34,9 @@ use the `VRT sync upstream` workflow instead.
 2. otherwise merges `upstream/main` into `sync/upstream-<date>`:
    - **clean** — keeps `.github/workflows/**` and `.github/actions/**` exactly as `vrt` has
      them (see below), pushes the branch, opens a PR into `vrt`, and dispatches `VRT build`;
+   - **include-only conflict** — `.vrt/resolve-includes.py` accepts both sides' `#include`
+     lines and the merge is committed, then treated as clean. This is the only conflict that
+     recurs: both sides add an include at the same anchor;
    - **conflict** — pushes a branch holding upstream's tree, opens a PR that shows the
      conflict, comments the conflicting paths, and labels it `sync-conflict`.
 
