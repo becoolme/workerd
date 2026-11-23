@@ -1208,7 +1208,8 @@ kj::Own<WorkerInterface> createEntrypoint(CompiledWorker::Impl& worker,
   auto limits = vrtLowerOf(worker.limits,
       VrtWorkerLimits{.cpuMs = entrypointLimits.cpu_ms,
         .memoryMb = entrypointLimits.memory_mb,
-        .subRequests = entrypointLimits.sub_requests});
+        .subRequests = entrypointLimits.sub_requests,
+        .outboundConnections = entrypointLimits.outbound_connections});
   if (limits.any()) {
     limitEnforcer = kj::refcounted<VrtLimitEnforcer>(
         limits, kj::atomicAddRef(*KJ_ASSERT_NONNULL(worker.isolateLimits)));
@@ -1697,6 +1698,7 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
       .cpuMs = spec.limits.cpu_ms,
       .memoryMb = spec.limits.memory_mb,
       .subRequests = spec.limits.sub_requests,
+      .outboundConnections = spec.limits.outbound_connections,
     };
   }
   // A dynamic Worker gets the isolate state too even while its own `code.limits` are all zero:
@@ -1748,7 +1750,8 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
     impl->limits = vrtLowerOf(code,
         VrtWorkerLimits{.cpuMs = spec.limits.cpu_ms,
           .memoryMb = spec.limits.memory_mb,
-          .subRequests = spec.limits.sub_requests});
+          .subRequests = spec.limits.sub_requests,
+          .outboundConnections = spec.limits.outbound_connections});
     compileBindings = [&env = dynamic.env](
                           jsg::Lock& js, const Worker::Api&, v8::Local<v8::Object> target) {
       env.populateJsObject(js, jsg::JsObject(target));

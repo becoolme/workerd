@@ -114,6 +114,78 @@ kj::Own<WorkerInterface> newPromisedWorkerInterface(kj::Promise<kj::Own<WorkerIn
   return kj::heap<PromisedWorkerInterface>(kj::mv(promise));
 }
 
+namespace {
+
+// Holds an outbound connection slot until the client that carries it is dropped. See
+// LimitEnforcer::newOutboundConnection() and IoContext::getSubrequest().
+class LeaseAwaitingWorkerInterface final: public WorkerInterface {
+ public:
+  LeaseAwaitingWorkerInterface(kj::Own<WorkerInterface> worker, kj::Promise<kj::Own<void>> lease)
+      : worker(kj::mv(worker)),
+        leasePromise(kj::mv(lease)) {}
+
+  kj::Promise<void> request(kj::HttpMethod method,
+      kj::StringPtr url,
+      const kj::HttpHeaders& headers,
+      kj::AsyncInputStream& requestBody,
+      Response& response) override {
+    co_await acquireLease();
+    co_await worker->request(method, url, headers, requestBody, response);
+  }
+
+  kj::Promise<void> connect(kj::StringPtr host,
+      const kj::HttpHeaders& headers,
+      kj::AsyncIoStream& connection,
+      ConnectResponse& response,
+      kj::HttpConnectSettings settings) override {
+    co_await acquireLease();
+    co_await worker->connect(host, headers, connection, response, kj::mv(settings));
+  }
+
+  kj::Promise<void> prewarm(kj::StringPtr url) override {
+    return worker->prewarm(url);
+  }
+
+  kj::Promise<ScheduledResult> runScheduled(kj::Date scheduledTime, kj::StringPtr cron) override {
+    return worker->runScheduled(scheduledTime, cron);
+  }
+
+  kj::Promise<AlarmResult> runAlarm(kj::Date scheduledTime, uint32_t retryCount) override {
+    return worker->runAlarm(scheduledTime, retryCount);
+  }
+
+  kj::Promise<kj::Maybe<kj::Date>> abandonAlarm(kj::Date scheduledTime) override {
+    return worker->abandonAlarm(scheduledTime);
+  }
+
+  kj::Promise<CustomEvent::Result> customEvent(kj::Own<CustomEvent> event) override {
+    return worker->customEvent(kj::mv(event));
+  }
+
+ private:
+  // Completes once a slot is available. The slot itself is kept in `lease` for the wrapper's
+  // lifetime, so a later event on the same wrapper does not wait again.
+  kj::Promise<void> acquireLease() {
+    KJ_IF_SOME(promise, leasePromise) {
+      auto waitForSlot = kj::mv(promise);
+      leasePromise = kj::none;
+      return waitForSlot.then([this](kj::Own<void> acquired) { lease = kj::mv(acquired); });
+    }
+    return kj::READY_NOW;
+  }
+
+  kj::Own<WorkerInterface> worker;
+  kj::Maybe<kj::Promise<kj::Own<void>>> leasePromise;
+  kj::Maybe<kj::Own<void>> lease;
+};
+
+}  // namespace
+
+kj::Own<WorkerInterface> newLeaseAwaitingWorkerInterface(
+    kj::Own<WorkerInterface> worker, kj::Promise<kj::Own<void>> lease) {
+  return kj::heap<LeaseAwaitingWorkerInterface>(kj::mv(worker), kj::mv(lease));
+}
+
 kj::Own<kj::HttpClient> asHttpClient(kj::Own<WorkerInterface> workerInterface) {
   return kj::newHttpClient(*workerInterface).attach(kj::mv(workerInterface));
 }

@@ -1448,8 +1448,16 @@ kj::Own<WorkerInterface> IoContext::getSubrequestNoChecks(
 kj::Own<WorkerInterface> IoContext::getSubrequest(
     kj::FunctionParam<kj::Own<WorkerInterface>(TraceContext&, IoChannelFactory&)> func,
     SubrequestOptions options) {
-  limitEnforcer->newSubrequest(options.inHouse);
-  return getSubrequestNoChecks(kj::mv(func), kj::mv(options), CountSubrequest::YES);
+  bool isInHouse = options.inHouse;
+  limitEnforcer->newSubrequest(isInHouse);
+  auto client = getSubrequestNoChecks(kj::mv(func), kj::mv(options), CountSubrequest::YES);
+  // A per-invocation outbound-connection limit takes its slot here, so that the client only opens a
+  // connection once one is free: the (N+1)th subrequest queues in the wrapper instead of failing.
+  // The slot lives as long as the client, which callers keep until the response body is read.
+  KJ_IF_SOME(lease, limitEnforcer->newOutboundConnection(isInHouse)) {
+    client = newLeaseAwaitingWorkerInterface(kj::mv(client), kj::mv(lease));
+  }
+  return kj::mv(client);
 }
 
 kj::Own<WorkerInterface> IoContext::getSubrequestChannel(uint channel,

@@ -6,6 +6,7 @@
 
 #include <workerd/util/exception.h>
 
+#include <kj/async.h>
 #include <kj/test.h>
 
 namespace workerd {
@@ -18,8 +19,21 @@ KJ_TEST("vrt limits: zero means unlimited") {
 
   KJ_EXPECT(VrtWorkerLimits{.cpuMs = 5}.hasInvocationLimits());
   KJ_EXPECT(VrtWorkerLimits{.subRequests = 5}.hasInvocationLimits());
+  KJ_EXPECT(VrtWorkerLimits{.outboundConnections = 5}.hasInvocationLimits());
   KJ_EXPECT(VrtWorkerLimits{.memoryMb = 5}.any());
+  KJ_EXPECT(VrtWorkerLimits{.outboundConnections = 5}.any());
   KJ_EXPECT(!(VrtWorkerLimits{.memoryMb = 5}.hasInvocationLimits()));
+}
+
+KJ_TEST("vrt limits: nested limits take the lower of the two") {
+  // A set dimension wins over 0 (unlimited); otherwise the smaller one wins.
+  auto withConnections = VrtWorkerLimits{.outboundConnections = 6};
+  KJ_EXPECT(vrtLowerOf(VrtWorkerLimits{}, withConnections).outboundConnections == 6);
+  KJ_EXPECT(vrtLowerOf(withConnections, VrtWorkerLimits{}).outboundConnections == 6);
+  KJ_EXPECT(vrtLowerOf(withConnections, VrtWorkerLimits{.outboundConnections = 4})
+                .outboundConnections == 4);
+  KJ_EXPECT(vrtLowerOf(VrtWorkerLimits{.outboundConnections = 4}, withConnections)
+                .outboundConnections == 4);
 }
 
 KJ_TEST("vrt limits: memory budget bytes") {
@@ -117,6 +131,107 @@ KJ_TEST("vrt limits: limit terminations are counted and consumed") {
   KJ_EXPECT(isolateState->consumeLimitTermination());
   KJ_EXPECT(isolateState->consumeLimitTermination());
   KJ_EXPECT(!isolateState->consumeLimitTermination());
+}
+
+KJ_TEST("vrt limits: connections past the limit wait for a free slot") {
+  kj::EventLoop loop;
+  kj::WaitScope ws(loop);
+
+  auto slots = kj::atomicRefcounted<VrtOutboundConnections>(2);
+
+  // The first two acquisitions are served immediately, up to the limit.
+  auto first = slots->acquire().wait(ws);
+  auto second = slots->acquire().wait(ws);
+
+  auto third = slots->acquire();
+  KJ_EXPECT(!third.poll(ws));
+
+  // Releasing one connection hands its slot to the waiting request instead of dropping it.
+  second = nullptr;
+  KJ_EXPECT(third.poll(ws));
+  auto thirdLease = third.wait(ws);
+
+  KJ_EXPECT(first.get() != nullptr);
+  KJ_EXPECT(thirdLease.get() != nullptr);
+}
+
+KJ_TEST("vrt limits: queued connections are served in arrival order") {
+  kj::EventLoop loop;
+  kj::WaitScope ws(loop);
+
+  auto slots = kj::atomicRefcounted<VrtOutboundConnections>(1);
+  auto first = slots->acquire().wait(ws);
+
+  auto second = slots->acquire();
+  auto third = slots->acquire();
+  KJ_EXPECT(!second.poll(ws));
+  KJ_EXPECT(!third.poll(ws));
+
+  first = nullptr;
+  KJ_EXPECT(second.poll(ws));
+  // The slot went to the oldest waiter, not to both.
+  KJ_EXPECT(!third.poll(ws));
+
+  auto secondLease = second.wait(ws);
+  secondLease = nullptr;
+  KJ_EXPECT(third.poll(ws));
+  auto thirdLease = third.wait(ws);
+  KJ_EXPECT(thirdLease.get() != nullptr);
+}
+
+KJ_TEST("vrt limits: a cancelled queued connection gives up its place") {
+  kj::EventLoop loop;
+  kj::WaitScope ws(loop);
+
+  auto slots = kj::atomicRefcounted<VrtOutboundConnections>(1);
+  auto held = slots->acquire().wait(ws);
+
+  {
+    // Queued, then dropped before a slot was free: the request is gone, so it must not keep a
+    // place in line (a slot handed to it would never be released).
+    auto abandoned = slots->acquire();
+    KJ_EXPECT(!abandoned.poll(ws));
+  }
+
+  auto next = slots->acquire();
+  KJ_EXPECT(!next.poll(ws));
+
+  held = nullptr;
+  KJ_EXPECT(next.poll(ws));
+  auto nextLease = next.wait(ws);
+  KJ_EXPECT(nextLease.get() != nullptr);
+}
+
+KJ_TEST("vrt limits: only external subrequests take a connection slot") {
+  kj::EventLoop loop;
+  kj::WaitScope ws(loop);
+
+  auto isolateState = kj::atomicRefcounted<VrtIsolateLimitState>();
+
+  // Without the dimension the enforcer never limits concurrency.
+  auto unlimited =
+      kj::refcounted<VrtLimitEnforcer>(VrtWorkerLimits{}, kj::atomicAddRef(*isolateState));
+  KJ_EXPECT(unlimited->newOutboundConnection(false) == kj::none);
+
+  auto limited = kj::refcounted<VrtLimitEnforcer>(
+      VrtWorkerLimits{.outboundConnections = 1}, kj::atomicAddRef(*isolateState));
+  // In-house calls (KV, R2, actor storage, ...) open no outbound connection.
+  KJ_EXPECT(limited->newOutboundConnection(true) == kj::none);
+
+  auto firstSlot = limited->newOutboundConnection(false);
+  KJ_IF_SOME(promise, firstSlot) {
+    auto lease = promise.wait(ws);
+    KJ_EXPECT(lease.get() != nullptr);
+    // The single slot is taken now, so the next external subrequest has to queue.
+    auto secondSlot = limited->newOutboundConnection(false);
+    KJ_IF_SOME(queued, secondSlot) {
+      KJ_EXPECT(!queued.poll(ws));
+    } else {
+      KJ_FAIL_EXPECT("expected a queued connection slot");
+    }
+  } else {
+    KJ_FAIL_EXPECT("expected a connection slot");
+  }
 }
 
 }  // namespace

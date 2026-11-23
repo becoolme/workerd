@@ -220,6 +220,14 @@ class WorkerInterface: public kj::HttpService {
 // for the promise, then invoke the destination object.
 kj::Own<WorkerInterface> newPromisedWorkerInterface(kj::Promise<kj::Own<WorkerInterface>> promise);
 
+// Wraps `worker` so that its first request or CONNECT tunnel first waits for `lease` -- an outbound
+// connection slot, see LimitEnforcer::newOutboundConnection() -- and holds that handle until the
+// wrapper is dropped. Callers keep the client alive for as long as the connection is in use
+// (normally by attaching it to the response body), so dropping the wrapper frees the slot at the
+// right time. Other event types pass straight through: they don't open an outbound connection.
+kj::Own<WorkerInterface> newLeaseAwaitingWorkerInterface(
+    kj::Own<WorkerInterface> worker, kj::Promise<kj::Own<void>> lease);
+
 template <typename Func>
 class LazyWorkerInterface final: public WorkerInterface {
  public:

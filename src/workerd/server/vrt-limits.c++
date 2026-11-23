@@ -143,6 +143,90 @@ kj::Exception vrtMemoryLimitException() {
 }
 
 // =======================================================================================
+// VrtOutboundConnections
+
+namespace {
+
+// A held connection slot: dropping it hands the slot to the next queued acquisition.
+class VrtConnectionLease final {
+ public:
+  explicit VrtConnectionLease(kj::Own<VrtOutboundConnections> slots): slots(kj::mv(slots)) {}
+  ~VrtConnectionLease() noexcept(false) {
+    slots->release();
+  }
+  KJ_DISALLOW_COPY_AND_MOVE(VrtConnectionLease);
+
+ private:
+  kj::Own<VrtOutboundConnections> slots;
+};
+
+}  // namespace
+
+kj::Promise<kj::Own<void>> VrtOutboundConnections::acquire() {
+  // The common case: a slot is free, so no promise machinery is needed at all.
+  {
+    auto lock = state.lockExclusive();
+    if (lock->inUse < limit && lock->queue.empty()) {
+      ++lock->inUse;
+      kj::Own<void> lease = kj::heap<VrtConnectionLease>(kj::atomicAddRef(*this));
+      return kj::mv(lease);
+    }
+  }
+
+  auto paf = kj::newPromiseAndFulfiller<kj::Own<void>>();
+  uint64_t waiterId = 0;
+  {
+    auto lock = state.lockExclusive();
+    waiterId = lock->nextId++;
+    lock->queue.add(kj::heap<Waiter>(Waiter{waiterId, kj::mv(paf.fulfiller)}));
+  }
+
+  // A cancelled acquisition (the fetch was aborted, or the invocation ended) must give up its place
+  // in line, or a slot could later be handed to a request that is no longer waiting.
+  return kj::mv(paf.promise).attach(
+      kj::defer([self = kj::atomicAddRef(*this), waiterId]() mutable { self->abandon(waiterId); }));
+}
+
+void VrtOutboundConnections::release() {
+  kj::Own<kj::PromiseFulfiller<kj::Own<void>>> wake;
+  {
+    auto lock = state.lockExclusive();
+    if (lock->queue.empty()) {
+      KJ_REQUIRE(lock->inUse > 0, "an outbound connection slot was released twice");
+      --lock->inUse;
+      return;
+    }
+    // Hand the slot straight to the oldest waiter: the count stays the same, and the waiter holds
+    // the slot from the moment its promise is fulfilled.
+    wake = kj::mv(lock->queue[0]->fulfiller);
+    for (uint i = 0; i + 1 < lock->queue.size(); ++i) {
+      lock->queue[i] = kj::mv(lock->queue[i + 1]);
+    }
+    lock->queue.removeLast();
+  }
+
+  // Fulfilled outside the lock: the continuation resumes synchronously and may acquire another
+  // slot of its own.
+  kj::Own<void> lease = kj::heap<VrtConnectionLease>(kj::atomicAddRef(*this));
+  wake->fulfill(kj::mv(lease));
+}
+
+void VrtOutboundConnections::abandon(uint64_t id) {
+  auto lock = state.lockExclusive();
+  for (uint i = 0; i < lock->queue.size(); ++i) {
+    if (lock->queue[i]->id != id) continue;
+    for (uint j = i; j + 1 < lock->queue.size(); ++j) {
+      lock->queue[j] = kj::mv(lock->queue[j + 1]);
+    }
+    lock->queue.removeLast();
+    return;
+  }
+  // Not queued any more: either it already took delivery of a slot (which then travels with the
+  // fulfilled promise) or it never queued.
+}
+
+
+// =======================================================================================
 // VrtInvocationLimitState
 
 void VrtInvocationLimitState::markCpuExceeded(bool requestTermination) {
@@ -353,12 +437,23 @@ void VrtLimitWatchdog::loop() {
 // =======================================================================================
 // VrtLimitEnforcer
 
+namespace {
+
+// The invocation's connection slots, or none when the dimension is unlimited.
+kj::Maybe<kj::Own<VrtOutboundConnections>> newOutboundConnections(uint32_t limit) {
+  if (limit == 0) return kj::none;
+  return kj::atomicRefcounted<VrtOutboundConnections>(limit);
+}
+
+}  // namespace
+
 VrtLimitEnforcer::VrtLimitEnforcer(
     VrtWorkerLimits limits, kj::Own<VrtIsolateLimitState> isolateState)
     : limits(limits),
       isolateState(kj::mv(isolateState)),
       invocation(kj::atomicRefcounted<VrtInvocationLimitState>(
-          kj::atomicAddRef(*this->isolateState))) {}
+          kj::atomicAddRef(*this->isolateState))),
+      outboundConnections(newOutboundConnections(limits.outboundConnections)) {}
 
 kj::Duration VrtLimitEnforcer::cpuBudget() const {
   return static_cast<int64_t>(limits.cpuMs) * kj::MILLISECONDS;
@@ -471,6 +566,9 @@ void VrtLimitEnforcer::topUpActor() {
   aeEventsUsed = 0;
   invocation->reset();
   isolateState->clearHeapLimit();
+  // The outbound-connection slots are deliberately not touched: they describe connections that are
+  // open right now, not a budget that a new event refills. A lease kept by a client from an earlier
+  // event still holds its slot, and frees it when the client goes away.
 }
 
 void VrtLimitEnforcer::newSubrequest(bool isInHouse) {
@@ -483,6 +581,17 @@ void VrtLimitEnforcer::newSubrequest(bool isInHouse) {
     JSG_FAIL_REQUIRE(Error, "Too many subrequests.");
   }
   ++subrequestsUsed;
+}
+
+kj::Maybe<kj::Promise<kj::Own<void>>> VrtLimitEnforcer::newOutboundConnection(bool isInHouse) {
+  // A call into a service the platform provides internally (KV, R2, actor storage, ...) never
+  // leaves the process, so it opens no outbound connection, exactly as it is not charged to the
+  // subrequest budget.
+  if (isInHouse) return kj::none;
+  KJ_IF_SOME(slots, outboundConnections) {
+    return slots->acquire();
+  }
+  return kj::none;
 }
 
 void VrtLimitEnforcer::newAnalyticsEngineRequest() {
