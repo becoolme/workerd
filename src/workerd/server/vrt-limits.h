@@ -22,6 +22,13 @@
 //   once. A request past the cap waits for a connection to free up rather than failing, as
 //   Cloudflare documents for the dimension; the slot is held for as long as the caller keeps the
 //   client (normally until the response body is read).
+// - Startup CPU: every startup entry point (module compilation, main-module resolution, top-level
+//   evaluation) runs under a fixed 1 second CPU budget -- Cloudflare's documented Worker startup
+//   limit -- measured with the same thread clock and enforced by the same watchdog. An overrun
+//   fails the Worker's startup with the CPU-limit exception instead of hanging the process. The
+//   budget is per entry point rather than cumulative: a standalone workerd pays a large fixed CPU
+//   cost to bootstrap its isolate before any Worker code runs, and charging that to the Worker
+//   would fail it long before 1 second of its own work.
 //
 // Zero always means "unlimited". A Worker with every dimension at zero keeps the `Null*`
 // enforcers and behaves exactly as an unmodified workerd.
@@ -85,10 +92,19 @@ constexpr VrtWorkerLimits vrtLowerOf(VrtWorkerLimits a, VrtWorkerLimits b) {
 // The memory budget in bytes, 0 when unlimited. Cannot overflow: `memoryMb` is 32 bits.
 uint64_t vrtMemoryLimitBytes(uint32_t memoryMb);
 
+// Cloudflare's documented Worker startup limit: 1 second of CPU per startup entry point. Not
+// configurable, and only enforced for a Worker that runs on the enforcing enforcer (any configured
+// `limits` dimension, or a dynamic worker): an unlimited static Worker keeps the null enforcers and
+// therefore unmodified workerd behavior.
+constexpr kj::Duration VRT_STARTUP_CPU_BUDGET = 1000 * kj::MILLISECONDS;
+
 // The stable exceptions Cloudflare's embedder throws for these limits. Both are `Error`s carrying
 // the detail id that turns a termination into the matching `EventOutcome`.
 kj::Exception vrtCpuLimitException();
 kj::Exception vrtMemoryLimitException();
+// A startup overrun. Carries `CPU_LIMIT_DETAIL_ID`, like the per-invocation exception, so the
+// failure maps to Cloudflare's exceeded-CPU outcome (HTTP 1102) wherever it is reported.
+kj::Exception vrtStartupCpuLimitException();
 
 class VrtInvocationLimitState;
 
@@ -369,8 +385,16 @@ class VrtIsolateLimitEnforcer final: public IsolateLimitEnforcer {
   // aborting the process.
   static size_t onNearHeapLimit(void* data, size_t currentHeapLimit, size_t initialHeapLimit);
 
+  // Opens one startup scope under the isolate's startup CPU budget. Shared by
+  // `enterStartupJs()` and `enterStartupPython()`. Throws (and records the error in
+  // `limitErrorOrTime`) when the budget is already spent or cannot be measured.
+  kj::Own<void> enterStartupScope(
+      kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const;
+
   const uint32_t memoryMb;
-  kj::Own<VrtIsolateLimitState> state;
+  // Mutable: the startup scopes are opened from the const `enterStartupJs()` / `enterStartupPython()`
+  // overrides, and they must hold a reference to the state sharing the startup budget.
+  mutable kj::Own<VrtIsolateLimitState> state;
   v8::Isolate* isolate = nullptr;
   TrackedWasmInstanceList trackedWasmInstances;
 };

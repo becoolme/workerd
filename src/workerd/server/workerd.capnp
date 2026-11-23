@@ -1266,8 +1266,13 @@ struct Worker {
     cpuMs @21 :UInt32;
     # CPU budget per invocation, in milliseconds, accumulated from the thread CPU clock over the
     # Worker's JavaScript turns. When exhausted, the isolate is terminated through V8 and the
-    # request fails as an exceeded-CPU error. Time spent awaiting I/O is not counted, and startup
-    # (top-level evaluation) is not limited.
+    # request fails as an exceeded-CPU error. Time spent awaiting I/O is not counted. Startup
+    # (compilation, module resolution and top-level evaluation) has its own fixed budget, like
+    # Cloudflare's: 1 second of CPU per startup entry point, which fails startup with the same
+    # exceeded-CPU error. Neither budget applies to a statically configured Worker whose `limits`
+    # group is entirely unset: it keeps the null enforcers and therefore stock workerd behavior. A
+    # dynamically loaded Worker always runs the enforcing enforcer (its `code.limits` can arrive per
+    # call), so its startup is always bounded.
 
     memoryMb @22 :UInt32;
     # V8 JavaScript heap budget for the Worker's isolate, in MiB. Exhausting it terminates the
