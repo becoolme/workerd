@@ -16,6 +16,10 @@
 //   exception carries `CPU_LIMIT_DETAIL_ID`.
 // - Memory: a per-isolate V8 JavaScript heap limit, plus a near-heap-limit callback that
 //   blames the running invocation and terminates it instead of letting V8 abort the process.
+//   V8's external memory -- ArrayBuffer and WebAssembly backing stores, plus the accounting
+//   workerd applies to subrequests -- counts toward the same budget, checked at each JavaScript
+//   turn boundary because V8's own heap limit does not cover it. SQLite (Durable Object storage)
+//   and other native allocations are not counted; see `memoryMb` in `workerd.capnp`.
 // - Subrequests: a per-invocation count checked before each outbound subrequest, throwing
 //   `Error: Too many subrequests.` before the request has any effect.
 // - Outbound connections: a per-invocation cap on how many outbound subrequests are in flight at
@@ -91,6 +95,12 @@ constexpr VrtWorkerLimits vrtLowerOf(VrtWorkerLimits a, VrtWorkerLimits b) {
 
 // The memory budget in bytes, 0 when unlimited. Cannot overflow: `memoryMb` is 32 bits.
 uint64_t vrtMemoryLimitBytes(uint32_t memoryMb);
+
+// Whether a heap snapshot is over the configured memory budget, counting V8's external memory
+// (ArrayBuffer and WebAssembly backing stores, plus the adjustment workerd applies to subrequests)
+// alongside the committed JavaScript heap. 0 means unlimited. Written so the addition of the two
+// sizes cannot overflow.
+bool vrtMemoryBudgetExceeded(uint32_t memoryMb, uint64_t heapBytes, uint64_t externalBytes);
 
 // Cloudflare's documented Worker startup limit: 1 second of CPU per startup entry point. Not
 // configurable, and only enforced for a Worker that runs on the enforcing enforcer (any configured

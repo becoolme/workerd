@@ -44,6 +44,28 @@ KJ_TEST("vrt limits: memory budget bytes") {
   KJ_EXPECT(vrtMemoryLimitBytes(65'536) == 65'536ull * 1024 * 1024);
 }
 
+KJ_TEST("vrt limits: memory budget counts external memory") {
+  const uint64_t budget = vrtMemoryLimitBytes(100);
+
+  // 0 is unlimited, whatever the isolate is holding.
+  KJ_EXPECT(!vrtMemoryBudgetExceeded(0, budget * 10, budget * 10));
+
+  // The JavaScript heap alone can exceed the budget.
+  KJ_EXPECT(!vrtMemoryBudgetExceeded(100, budget - 1024, 0));
+  KJ_EXPECT(vrtMemoryBudgetExceeded(100, budget + 1, 0));
+
+  // So can V8's external memory (ArrayBuffer backing stores) with a small heap.
+  KJ_EXPECT(!vrtMemoryBudgetExceeded(100, budget / 4, budget / 4));
+  KJ_EXPECT(vrtMemoryBudgetExceeded(100, budget / 4, budget));
+
+  // The two are accounted together.
+  KJ_EXPECT(!vrtMemoryBudgetExceeded(100, budget / 2, budget / 2));
+  KJ_EXPECT(vrtMemoryBudgetExceeded(100, budget / 2, budget / 2 + 1));
+
+  // Extreme sizes must not overflow into a false negative.
+  KJ_EXPECT(vrtMemoryBudgetExceeded(1, kj::maxValue, kj::maxValue));
+}
+
 KJ_TEST("vrt limits: subrequest budget") {
   auto isolateState = kj::atomicRefcounted<VrtIsolateLimitState>();
   auto enforcer = kj::refcounted<VrtLimitEnforcer>(
