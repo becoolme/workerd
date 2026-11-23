@@ -123,15 +123,16 @@ pub mod ffi {
         env_actor_classes: u32,
     }
 
-    /// The `limits` group of a config Worker: per-invocation CPU and subrequest budgets plus the
-    /// isolate heap budget. Every field is 0 when the dimension is unlimited. Also carries a
-    /// `getEntrypoint()`/`getDurableObjectClass()` options' `limits`: the lower of it and the
-    /// Worker's own limits applies to the invocation.
+    /// The `limits` group of a config Worker: per-invocation CPU, subrequest and outbound-connection
+    /// budgets plus the isolate heap budget. Every field is 0 when the dimension is unlimited. Also
+    /// carries a `getEntrypoint()`/`getDurableObjectClass()` options' `limits`: the lower of it and
+    /// the Worker's own limits applies to the invocation.
     #[derive(Clone, Copy, Default)]
     struct WorkerLimits {
         cpu_ms: u32,
         memory_mb: u32,
         sub_requests: u32,
+        outbound_connections: u32,
     }
 
     struct WorkerSpec {

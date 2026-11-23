@@ -18,6 +18,10 @@
 //   blames the running invocation and terminates it instead of letting V8 abort the process.
 // - Subrequests: a per-invocation count checked before each outbound subrequest, throwing
 //   `Error: Too many subrequests.` before the request has any effect.
+// - Outbound connections: a per-invocation cap on how many outbound subrequests are in flight at
+//   once. A request past the cap waits for a connection to free up rather than failing, as
+//   Cloudflare documents for the dimension; the slot is held for as long as the caller keeps the
+//   client (normally until the response body is read).
 //
 // Zero always means "unlimited". A Worker with every dimension at zero keeps the `Null*`
 // enforcers and behaves exactly as an unmodified workerd.
@@ -52,15 +56,16 @@ struct VrtWorkerLimits {
   uint32_t cpuMs = 0;
   uint32_t memoryMb = 0;
   uint32_t subRequests = 0;
+  uint32_t outboundConnections = 0;
 
-  // Whether a per-invocation `LimitEnforcer` is needed (CPU or subrequests).
+  // Whether a per-invocation `LimitEnforcer` is needed (CPU, subrequests or connections).
   bool hasInvocationLimits() const {
-    return cpuMs != 0 || subRequests != 0;
+    return cpuMs != 0 || subRequests != 0 || outboundConnections != 0;
   }
 
   // Whether any limit is configured. When false the Worker keeps the `Null*` enforcers.
   bool any() const {
-    return cpuMs != 0 || memoryMb != 0 || subRequests != 0;
+    return cpuMs != 0 || memoryMb != 0 || subRequests != 0 || outboundConnections != 0;
   }
 };
 
@@ -73,7 +78,8 @@ constexpr uint32_t vrtLowerOf(uint32_t a, uint32_t b) {
 constexpr VrtWorkerLimits vrtLowerOf(VrtWorkerLimits a, VrtWorkerLimits b) {
   return {.cpuMs = vrtLowerOf(a.cpuMs, b.cpuMs),
     .memoryMb = vrtLowerOf(a.memoryMb, b.memoryMb),
-    .subRequests = vrtLowerOf(a.subRequests, b.subRequests)};
+    .subRequests = vrtLowerOf(a.subRequests, b.subRequests),
+    .outboundConnections = vrtLowerOf(a.outboundConnections, b.outboundConnections)};
 }
 
 // The memory budget in bytes, 0 when unlimited. Cannot overflow: `memoryMb` is 32 bits.
@@ -171,6 +177,43 @@ class VrtInvocationLimitState final: public kj::AtomicRefcounted {
   std::atomic<bool> memoryExceededFlag{false};
 };
 
+// Bounds how many outbound connections one invocation may have in flight.
+//
+// Cloudflare documents the dimension as "at most N simultaneous outbound connections; a further
+// request waits for one to become free", so acquire() queues rather than throws: the promise
+// resolves, in arrival order, once a slot is available, and every slot is returned by dropping its
+// lease. A slot is state rather than a budget: a new actor event (`topUpActor()`) does not reset
+// it, and an invocation that ends with connections still open frees them as it drops its clients.
+class VrtOutboundConnections final: public kj::AtomicRefcounted {
+ public:
+  explicit VrtOutboundConnections(uint32_t limit): limit(limit) {}
+
+  // Waits for a connection slot and returns its lease; dropping the lease frees the slot. Only
+  // called for the invocation that owns this object, from the IoContext's thread.
+  kj::Promise<kj::Own<void>> acquire();
+
+  // Internal, for the lease and for cancelled acquisitions.
+  void release();
+  void abandon(uint64_t id);
+
+ private:
+  struct Waiter {
+    uint64_t id;
+    kj::Own<kj::PromiseFulfiller<kj::Own<void>>> fulfiller;
+  };
+  struct State {
+    // Slots handed out but not yet returned, including one queued request that has been promised
+    // the next free slot.
+    uint32_t inUse = 0;
+    uint64_t nextId = 1;
+    // Queued acquisitions, oldest first.
+    kj::Vector<kj::Own<Waiter>> queue;
+  };
+
+  const uint32_t limit;
+  kj::MutexGuarded<State> state;
+};
+
 // Samples the CPU clock of every thread running limited JavaScript and terminates the isolates of
 // invocations that have spent their budget.
 //
@@ -242,6 +285,7 @@ class VrtLimitEnforcer final: public LimitEnforcer, public kj::Refcounted {
   kj::Own<void> enterJs(jsg::Lock& lock, IoContext& context) override;
   void topUpActor() override;
   void newSubrequest(bool isInHouse) override;
+  kj::Maybe<kj::Promise<kj::Own<void>>> newOutboundConnection(bool isInHouse) override;
   void newKvRequest(KvOpType) override {}
   void newAnalyticsEngineRequest() override;
   kj::Promise<void> limitDrain() override;
@@ -273,6 +317,9 @@ class VrtLimitEnforcer final: public LimitEnforcer, public kj::Refcounted {
   const VrtWorkerLimits limits;
   kj::Own<VrtIsolateLimitState> isolateState;
   kj::Own<VrtInvocationLimitState> invocation;
+
+  // The invocation's outbound-connection slots, when the dimension is limited.
+  kj::Maybe<kj::Own<VrtOutboundConnections>> outboundConnections;
 
   // All below are touched only while the isolate lock is held, which serializes every turn of one
   // invocation (IoContext cannot switch threads, and only one thread locks an isolate at a time).

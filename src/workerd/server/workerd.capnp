@@ -1279,6 +1279,13 @@ struct Worker {
     # Outbound subrequests per invocation. The (N+1)th subrequest throws `Error: Too many
     # subrequests.` before it has any effect. Calls to services provided internally (KV, R2,
     # actor storage, ...) are exempt, like Cloudflare's in-house subrequests.
+
+    outboundConnections @24 :UInt32;
+    # Simultaneous outbound connections per invocation. A subrequest beyond this many waits for one
+    # of the others to complete rather than failing, matching Cloudflare's documented behavior for
+    # the dimension: the connection is considered in use until the caller has finished with the
+    # client, which in practice means until the response body is read. Calls to services provided
+    # internally (KV, R2, actor storage, ...) open no outbound connection and are exempt.
   }
 }
 

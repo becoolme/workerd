@@ -157,6 +157,7 @@ pub struct WorkerService {
 const MAX_WORKER_CPU_MS: u32 = 3_600_000; // one hour
 const MAX_WORKER_MEMORY_MB: u32 = 65_536; // 64 GiB
 const MAX_WORKER_SUBREQUESTS: u32 = 10_000_000; // Cloudflare's Standard configurability ceiling
+const MAX_WORKER_OUTBOUND_CONNECTIONS: u32 = 1_000; // far above any plan; bounds the wait queue
 
 /// Reads and validates a config Worker's `limits` group. Errors are reported against the service
 /// and the offending dimension falls back to unlimited, so the worker is marked broken rather
@@ -185,6 +186,11 @@ fn read_worker_limits(
         cpu_ms: read("cpuMs", limits.get_cpu_ms(), MAX_WORKER_CPU_MS),
         memory_mb: read("memoryMb", limits.get_memory_mb(), MAX_WORKER_MEMORY_MB),
         sub_requests: read("subRequests", limits.get_sub_requests(), MAX_WORKER_SUBREQUESTS),
+        outbound_connections: read(
+            "outboundConnections",
+            limits.get_outbound_connections(),
+            MAX_WORKER_OUTBOUND_CONNECTIONS,
+        ),
     }
 }
 

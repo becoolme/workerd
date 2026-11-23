@@ -153,6 +153,19 @@ class LimitEnforcer {
   // external subrequests.
   virtual void newSubrequest(bool isInHouse) = 0;
 
+  // Called when an outbound (non-in-house) subrequest is about to open its connection, to bound how
+  // many such connections the invocation may have in flight at once.
+  //
+  // Returns null when this enforcer does not limit concurrency, which is the default. Otherwise it
+  // returns a slot: the promise resolves when the connection may be opened -- it waits while the
+  // budget is spent, so an over-limit request queues instead of failing -- and the returned handle
+  // frees the slot when dropped, which must happen once the connection is no longer in use.
+  // IoContext keeps both ends alive for as long as the caller keeps the client it returned, so a
+  // slot is held exactly while the connection is busy (normally until the response body is read).
+  virtual kj::Maybe<kj::Promise<kj::Own<void>>> newOutboundConnection(bool isInHouse) {
+    return kj::none;
+  }
+
   enum class KvOpType { GET, GET_WITH, PUT, LIST, DELETE, GET_BULK };
   // Called before starting a KV operation. Throws a JSG exception if the operation should be
   // blocked due to exceeding limits, such as the free tier daily operation limit.
