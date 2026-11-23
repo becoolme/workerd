@@ -16,7 +16,6 @@
 // fallible in the bridge, where a C++ exception becomes a `Result` error on the Rust side; the rest
 // do not throw.
 
-#include <workerd/api/memory-cache.h>
 #include <workerd/api/pyodide/pyodide.h>
 #include <workerd/io/async-trace.h>
 #include <workerd/io/io-channels.h>
@@ -25,14 +24,9 @@
 #include <workerd/io/worker.h>
 #include <workerd/jsg/exception.h>
 #include <workerd/rust/kj/ffi.h>
-#include <workerd/rust/worker/bridge.h>
+#include <workerd/rust/worker/ffi.rs.h>
 #include <workerd/server/channel-token.h>
-#include <workerd/server/workerd.capnp.h>
 
-#include <kj-rs/kj-rs.h>
-
-#include <capnp/compat/byte-stream.h>
-#include <capnp/compat/http-over-capnp.h>
 #include <kj/async-io.h>
 #include <kj/compat/http.h>
 #include <kj/filesystem.h>
@@ -106,7 +100,6 @@ struct WorkerStartupTiming;
 struct ActorStorageSpec;
 struct HeaderEdit;
 struct UdpDatagram;
-enum class AlarmElsewhere : uint8_t;
 
 // How the config message is read: configs can legitimately be very large and are not malicious.
 constexpr capnp::ReaderOptions CONFIG_READER_OPTIONS = {.traversalLimitInWords = kj::maxValue};
@@ -341,7 +334,6 @@ kj::Own<ActorStorage> factory_new_actor_storage(const WorkerFactory& factory,
     ::rust::Box<ActorNamespaceHandle> actors);
 void actor_storage_set_alarm(
     const ActorStorage& storage, ::rust::Str actor, ::rust::Str name, uint64_t atMs);
-kj::Own<WorkerInterface> alarm_owned_elsewhere(AlarmElsewhere then);
 void actor_storage_delete_all(const ActorStorage& storage);
 // Facets have numbers only in a directory (SQLite storage). In-memory storage is an ActorCache per
 // actor, in which they have none, and nothing to delete or clone.
