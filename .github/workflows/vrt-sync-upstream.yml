@@ -12,8 +12,10 @@ name: VRT sync upstream
 #          (`.gitattributes` merges them `ours`, and the merge restores the trees afterwards),
 #          so the push never needs `workflows` permission;
 #        - clean merge -> push the branch, open a PR into `vrt`, dispatch the build;
-#        - conflict    -> push a branch holding upstream's tree so GitHub shows the conflicting
-#                         PR, comment the conflicted files, and label it for a maintainer.
+#        - conflict    -> an include-only conflict is auto-resolved and the merge retried; any
+#                         other conflict pushes a branch holding upstream's tree so GitHub shows
+#                         the conflicting PR, comments the conflicted files, and labels it for a
+#                         maintainer.
 
 on:
   schedule:
@@ -101,32 +103,40 @@ jobs:
           branch="sync/upstream-$(date -u +%Y%m%d)"
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           git checkout -B "$branch" origin/vrt
-          if git merge --no-edit --no-ff upstream/main; then
-            # Our workflows and composite actions never come from upstream. The App token has no
-            # `workflows` permission, so any diff there fails the push, and `merge=ours` only
-            # covers edits -- upstream additions (e.g. a new pgo-*.yml) still land. Restore the
-            # trees exactly as `vrt` has them and drop what upstream added.
-            git checkout origin/vrt -- .github/workflows .github/actions
-            git diff --cached --name-only --diff-filter=A origin/vrt -- .github/workflows .github/actions \
-              | xargs -r git rm -f -q --
-            if ! git diff --quiet origin/vrt -- .github/workflows .github/actions; then
-              echo "::error::.github/workflows or .github/actions still differs from vrt after restore"
-              exit 1
+          if ! git merge --no-edit --no-ff upstream/main; then
+            # Both sides regularly add an #include at the same anchor; accept both and retry.
+            # Anything else is a real conflict: fall through to the conflict PR, never push
+            # conflict markers.
+            if git diff --name-only --diff-filter=U \
+                | xargs -r python3 .vrt/resolve-includes.py \
+                && git add -u \
+                && git commit --no-edit; then
+              echo "resolved include-only conflicts"
+            else
+              git merge --abort
+              echo "clean=false" >> "$GITHUB_OUTPUT"
+              exit 0
             fi
-            # Record which upstream commit this tree carries. Release manifests read it so a
-            # binary can be traced to a workerd version without archaeology on the merge commit.
-            mkdir -p .vrt
-            printf '%s\n' "${{ steps.upstream.outputs.sha }}" > .vrt/upstream
-            git add .vrt/upstream
-            git commit --amend --no-edit
-            echo "clean=true" >> "$GITHUB_OUTPUT"
-            git log --oneline -1
-          else
-            # Never push conflict markers. A conflicted PR is opened from upstream's tree
-            # instead, so a human resolves it with full context.
-            git merge --abort
-            echo "clean=false" >> "$GITHUB_OUTPUT"
           fi
+          # Our workflows and composite actions never come from upstream. The App token has no
+          # `workflows` permission, so any diff there fails the push, and `merge=ours` only
+          # covers edits -- upstream additions (e.g. a new pgo-*.yml) still land. Restore the
+          # trees exactly as `vrt` has them and drop what upstream added.
+          git checkout origin/vrt -- .github/workflows .github/actions
+          git diff --cached --name-only --diff-filter=A origin/vrt -- .github/workflows .github/actions \
+            | xargs -r git rm -f -q --
+          if ! git diff --quiet origin/vrt -- .github/workflows .github/actions; then
+            echo "::error::.github/workflows or .github/actions still differs from vrt after restore"
+            exit 1
+          fi
+          # Record which upstream commit this tree carries. Release manifests read it so a
+          # binary can be traced to a workerd version without archaeology on the merge commit.
+          mkdir -p .vrt
+          printf '%s\n' "${{ steps.upstream.outputs.sha }}" > .vrt/upstream
+          git add .vrt/upstream
+          git commit --amend --no-edit
+          echo "clean=true" >> "$GITHUB_OUTPUT"
+          git log --oneline -1
 
       - name: Push clean merge
         if: steps.behind.outputs.needed == 'true' && steps.merge.outputs.clean == 'true'
@@ -200,8 +210,14 @@ jobs:
         run: |
           set -euo pipefail
           branch="${{ steps.merge.outputs.branch }}"
-          # The branch holds upstream's tree unchanged; the PR into vrt renders the conflict.
+          # The branch holds upstream's tree with our workflows; the PR into vrt renders the
+          # conflict. Its push still must not touch .github/workflows/* (no `workflows`
+          # permission), so hold those trees at vrt's version in a commit of their own.
           git checkout -B "$branch" upstream/main
+          git checkout origin/vrt -- .github/workflows .github/actions
+          git diff --cached --name-only --diff-filter=A origin/vrt -- .github/workflows .github/actions \
+            | xargs -r git rm -f -q --
+          git commit -q -m "chore: hold vrt's workflows and actions in the conflict branch"
           git push --force origin "$branch"
 
       - name: Collect conflicted files
