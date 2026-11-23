@@ -14,14 +14,14 @@ public. Our patches implement them for the standalone server and expose them in 
 | Branch | Content | How it changes |
 | --- | --- | --- |
 | `vrt` (default) | Upstream `main` + our patches + the workflows in this repo | Pull requests only, one topic per PR |
-| `main` | Frozen mirror of `cloudflare/workerd:main`, last updated 2026-11-23 | Not updated any more; do not commit here either |
+| `main` | Frozen mirror of `cloudflare/workerd:main`, last updated 2026-11-20 | Not updated any more; do not commit here either |
 | `sync/upstream-YYYYMMDD` | Throwaway branch for the weekly sync PR | Written by the sync workflow |
 | `feat/*`, `fix/*` | Topic branches | Delete after merge |
 
-The sync no longer writes a `main` mirror. A mirror push is a pure upstream tree, so it always
-carries `.github/workflows/*` changes, and a `GITHUB_TOKEN` push is refused without `workflows`
-permission — the mirror was the only step that ever failed. Compare `vrt` against
-`upstream/main` (the sync commit message records the upstream SHA) instead of reading `main`.
+The sync no longer writes a `main` mirror. Any push that carries `.github/workflows/*` is
+refused without `workflows` permission, and a mirror of upstream's tree always carries some, so
+the mirror could never succeed. Compare `vrt` against `upstream/main` (the sync PR body records
+the upstream SHA) instead of reading `main`.
 
 Do not use GitHub's "Sync fork" button. It fast-forwards the default branch, which is `vrt`;
 use the `VRT sync upstream` workflow instead.
