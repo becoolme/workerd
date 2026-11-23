@@ -142,6 +142,14 @@ kj::Exception vrtMemoryLimitException() {
   return e;
 }
 
+kj::Exception vrtStartupCpuLimitException() {
+  // Cloudflare's own wording for the deployment error a top level that overruns produces. The
+  // detail id is what turns the failure into an exceeded-CPU outcome downstream.
+  auto e = JSG_KJ_EXCEPTION(OVERLOADED, Error, "Script startup exceeded CPU time limit.");
+  e.setDetail(CPU_LIMIT_DETAIL_ID, kj::heapArray<kj::byte>(0));
+  return e;
+}
+
 // =======================================================================================
 // VrtOutboundConnections
 
@@ -705,15 +713,90 @@ ActorCacheSharedLruOptions VrtIsolateLimitEnforcer::getActorCacheLruOptions() {
     .neverFlush = true};
 }
 
+namespace {
+
+// One startup JS entry point (`enterStartupJs()` / `enterStartupPython()`).
+//
+// It measures the thread CPU time the entry point spends, through the same watchdog that enforces
+// the per-invocation CPU budget: the watchdog terminates the isolate once the deadline passes,
+// which unwinds the top level instead of letting it spin forever.
+//
+// On destruction it leaves one of two things in `limitErrorOrTime`, which is exactly what the
+// caller reads afterwards: the CPU-limit exception when the budget was exhausted, otherwise the
+// CPU time this entry point used (which the callers report as the startup time).
+class StartupJsScope final {
+ public:
+  StartupJsScope(kj::Own<VrtIsolateLimitState> state,
+      kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime,
+      kj::Duration start,
+      kj::Own<VrtInvocationLimitState> invocation,
+      VrtLimitWatchdog::Token token)
+      : state(kj::mv(state)),
+        limitErrorOrTime(limitErrorOrTime),
+        start(start),
+        invocation(kj::mv(invocation)),
+        token(token) {}
+
+  ~StartupJsScope() noexcept(false) {
+    VrtLimitWatchdog::instance().finishTurn(token);
+
+    kj::Duration elapsed = 0 * kj::SECONDS;
+    KJ_IF_SOME(end, VrtLimitWatchdog::currentThreadCpu()) {
+      if (end > start) elapsed = end - start;
+    }
+
+    // The scope is over, so no JS is running: a termination the watchdog requested while it ran
+    // must not be left pending, or it would kill the error reporting that comes next (the
+    // inspector path runs JS after a startup failure).
+    state->cancelPendingLimitTerminations();
+
+    if (invocation->cpuExceeded() || elapsed >= VRT_STARTUP_CPU_BUDGET) {
+      limitErrorOrTime = vrtStartupCpuLimitException();
+      return;
+    }
+    // Not an error: the callers use this as the measured startup time (`workerd bench` reports it).
+    limitErrorOrTime = elapsed;
+  }
+
+  KJ_DISALLOW_COPY_AND_MOVE(StartupJsScope);
+
+ private:
+  kj::Own<VrtIsolateLimitState> state;
+  kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime;
+  kj::Duration start;
+  kj::Own<VrtInvocationLimitState> invocation;
+  VrtLimitWatchdog::Token token;
+};
+
+}  // namespace
+
+kj::Own<void> VrtIsolateLimitEnforcer::enterStartupScope(
+    kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const {
+  // Fail closed: a startup budget that cannot be measured must not silently run unbounded.
+  KJ_IF_SOME(start, VrtLimitWatchdog::currentThreadCpu()) {
+    auto invocation = kj::atomicRefcounted<VrtInvocationLimitState>(kj::atomicAddRef(*state));
+    auto token = VrtLimitWatchdog::instance().registerTurn(
+        kj::atomicAddRef(*invocation), start, VRT_STARTUP_CPU_BUDGET);
+    if (token.valid) {
+      return kj::heap<StartupJsScope>(
+          kj::atomicAddRef(*state), limitErrorOrTime, start, kj::mv(invocation), token);
+    }
+  }
+
+  auto e = vrtStartupCpuLimitException();
+  limitErrorOrTime = e.clone();
+  kj::throwRecoverableException(kj::mv(e));
+  KJ_UNREACHABLE;
+}
+
 kj::Own<void> VrtIsolateLimitEnforcer::enterStartupJs(
-    jsg::Lock&, kj::OneOf<kj::Exception, kj::Duration>&) const {
-  // Startup CPU is not limited by this patch; only invocations are.
-  return {};
+    jsg::Lock&, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const {
+  return enterStartupScope(limitErrorOrTime);
 }
 
 kj::Own<void> VrtIsolateLimitEnforcer::enterStartupPython(
-    jsg::Lock&, kj::OneOf<kj::Exception, kj::Duration>&) const {
-  return {};
+    jsg::Lock&, kj::OneOf<kj::Exception, kj::Duration>& limitErrorOrTime) const {
+  return enterStartupScope(limitErrorOrTime);
 }
 
 kj::Own<void> VrtIsolateLimitEnforcer::enterDynamicImportJs(

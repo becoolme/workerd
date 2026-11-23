@@ -119,6 +119,19 @@ KJ_TEST("vrt limits: actor top-up starts a new budget") {
   enforcer->newSubrequest(false);
 }
 
+KJ_TEST("vrt limits: startup budget is Cloudflare's one second") {
+  // Fixed by design: this mirrors the platform limit rather than the Worker's own configuration.
+  KJ_EXPECT(VRT_STARTUP_CPU_BUDGET == 1000 * kj::MILLISECONDS);
+}
+
+KJ_TEST("vrt limits: startup violation maps to EXCEEDED_CPU") {
+  auto e = vrtStartupCpuLimitException();
+  KJ_EXPECT(e.getDescription().contains("Script startup exceeded CPU time limit"));
+  // The detail id is what turns the failure into Cloudflare's exceeded-CPU outcome (1102) where
+  // the platform reports it, exactly as for a per-invocation overrun.
+  KJ_EXPECT(e.getDetail(CPU_LIMIT_DETAIL_ID) != kj::none);
+}
+
 KJ_TEST("vrt limits: limit terminations are counted and consumed") {
   auto isolateState = kj::atomicRefcounted<VrtIsolateLimitState>();
   KJ_EXPECT(!isolateState->hasPendingLimitTermination());

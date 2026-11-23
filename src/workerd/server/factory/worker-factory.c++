@@ -1866,9 +1866,12 @@ kj::Promise<kj::Own<CompiledWorker>> compileWorker(const WorkerFactory& constFac
         makeIsolate(kj::str(impl->name, "-snapshot"), Worker::Isolate::InspectorPolicy::DISALLOW,
             jsg::SnapshotConfig(
                 jsg::MutableSnapshot{.artifact = kj::atomicRefcounted<jsg::SnapshotArtifact>()}),
-            // Only Workers without a memory limit take this path, so the zygote keeps the null
-            // enforcer.
-            kj::none);
+            // The zygote evaluates the Worker's top level, so a limited Worker gives it the
+            // enforcing enforcer too and its startup CPU budget applies here (the heap budget is
+            // zero on this path by construction: snapshotting is skipped for a memory limit).
+            impl->limits.any()
+                ? kj::Maybe<kj::Own<VrtIsolateLimitState>>(kj::atomicRefcounted<VrtIsolateLimitState>())
+                : kj::Maybe<kj::Own<VrtIsolateLimitState>>(kj::none));
     // Anything the zygote throws while compiling, evaluating or serializing only means this
     // Worker starts without a snapshot and evaluates its top level itself, printing what the
     // zygote's run only deferred.
