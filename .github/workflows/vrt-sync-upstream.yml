@@ -1,15 +1,16 @@
 name: VRT sync upstream
 
 # Keeps the fork in step with cloudflare/workerd without letting upstream rewrites touch the
-# patched branch by surprise:
-#
-#   main  <- pure mirror of cloudflare/workerd:main (no local commits, force-updated)
-#   vrt   <- our patches, only ever changed through pull requests
+# patched branch by surprise. `vrt` is our patches plus the upstream tree; there is no mirror
+# branch, because a `main` mirror push would always carry `.github/workflows/*` changes and a
+# GITHUB_TOKEN push is refused without `workflows` permission.
 #
 # Each run:
-#   1. force-updates `main` to upstream's `main`;
-#   2. if `vrt` already contains upstream, stops;
-#   3. otherwise merges upstream into `sync/upstream-<date>`:
+#   1. if `vrt` already contains upstream, stops;
+#   2. otherwise merges `upstream/main` into `sync/upstream-<date>`:
+#        - `.github/workflows/**` and `.github/actions/**` stay exactly as they are on `vrt`
+#          (`.gitattributes` merges them `ours`, and the merge restores the trees afterwards),
+#          so the push never needs `workflows` permission;
 #        - clean merge -> push the branch, open a PR into `vrt`, dispatch the build;
 #        - conflict    -> push a branch holding upstream's tree so GitHub shows the conflicting
 #                         PR, comment the conflicted files, and label it for a maintainer.
@@ -51,6 +52,9 @@ jobs:
         run: |
           git config user.name "vrt-sync-bot"
           git config user.email "vrt-sync-bot@users.noreply.github.com"
+          # `.gitattributes` keeps `.github/workflows/**` and `.github/actions/**` ours; the
+          # driver has to be configured or git refuses to merge those paths.
+          git config merge.ours.driver true
 
       # A PR authored by `github-actions[bot]` is treated as untrusted: GitHub parks its
       # `pull_request` run in `action_required` until a maintainer approves it, every week.
@@ -77,12 +81,6 @@ jobs:
           echo "sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
           echo "short=$(git rev-parse --short=12 upstream/main)" >> "$GITHUB_OUTPUT"
 
-      - name: Update main mirror
-        run: |
-          set -euo pipefail
-          # `main` is a mirror: it never carries local commits, so overwriting it is correct.
-          git push --force origin "refs/remotes/upstream/main:refs/heads/main"
-
       - name: Check whether vrt is behind
         id: behind
         run: |
@@ -104,6 +102,17 @@ jobs:
           echo "branch=$branch" >> "$GITHUB_OUTPUT"
           git checkout -B "$branch" origin/vrt
           if git merge --no-edit --no-ff upstream/main; then
+            # Our workflows and composite actions never come from upstream. The App token has no
+            # `workflows` permission, so any diff there fails the push, and `merge=ours` only
+            # covers edits -- upstream additions (e.g. a new pgo-*.yml) still land. Restore the
+            # trees exactly as `vrt` has them and drop what upstream added.
+            git checkout origin/vrt -- .github/workflows .github/actions
+            git diff --cached --name-only --diff-filter=A origin/vrt -- .github/workflows .github/actions \
+              | xargs -r git rm -f -q --
+            if ! git diff --quiet origin/vrt -- .github/workflows .github/actions; then
+              echo "::error::.github/workflows or .github/actions still differs from vrt after restore"
+              exit 1
+            fi
             # Record which upstream commit this tree carries. Release manifests read it so a
             # binary can be traced to a workerd version without archaeology on the merge commit.
             mkdir -p .vrt

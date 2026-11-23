@@ -1,0 +1,6 @@
+# Upstream sync (see FORK.md): upstream rewrites its workflows faster than we can review, and a
+# GITHUB_TOKEN push that touches .github/workflows/* is rejected without `workflows` permission.
+# Keep our versions on merge; the sync workflow also restores these trees from `vrt` after the
+# merge so upstream additions never reach the push. Requires `git config merge.ours.driver true`.
+/.github/workflows/** merge=ours
+/.github/actions/**   merge=ours

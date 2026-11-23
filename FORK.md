@@ -14,12 +14,14 @@ public. Our patches implement them for the standalone server and expose them in 
 | Branch | Content | How it changes |
 | --- | --- | --- |
 | `vrt` (default) | Upstream `main` + our patches + the workflows in this repo | Pull requests only, one topic per PR |
-| `main` | Pure mirror of `cloudflare/workerd:main` | Force-updated by the sync workflow; never commit here |
+| `main` | Frozen mirror of `cloudflare/workerd:main`, last updated 2026-11-23 | Not updated any more; do not commit here either |
 | `sync/upstream-YYYYMMDD` | Throwaway branch for the weekly sync PR | Written by the sync workflow |
 | `feat/*`, `fix/*` | Topic branches | Delete after merge |
 
-`main` is a mirror so a sync PR reads as "everything upstream landed since the last sync".
-Nothing builds from `main`; releases are cut from tags on `vrt`.
+The sync no longer writes a `main` mirror. A mirror push is a pure upstream tree, so it always
+carries `.github/workflows/*` changes, and a `GITHUB_TOKEN` push is refused without `workflows`
+permission — the mirror was the only step that ever failed. Compare `vrt` against
+`upstream/main` (the sync commit message records the upstream SHA) instead of reading `main`.
 
 Do not use GitHub's "Sync fork" button. It fast-forwards the default branch, which is `vrt`;
 use the `VRT sync upstream` workflow instead.
@@ -28,12 +30,22 @@ use the `VRT sync upstream` workflow instead.
 
 `.github/workflows/vrt-sync-upstream.yml` runs every Monday at 04:00 UTC and on demand:
 
-1. force-updates `main` to upstream `main`;
-2. exits if `vrt` already contains upstream;
-3. otherwise merges upstream into `sync/upstream-<date>`:
-   - **clean** — pushes the branch, opens a PR into `vrt`, and dispatches `VRT build`;
+1. exits if `vrt` already contains upstream `main`;
+2. otherwise merges `upstream/main` into `sync/upstream-<date>`:
+   - **clean** — keeps `.github/workflows/**` and `.github/actions/**` exactly as `vrt` has
+     them (see below), pushes the branch, opens a PR into `vrt`, and dispatches `VRT build`;
    - **conflict** — pushes a branch holding upstream's tree, opens a PR that shows the
      conflict, comments the conflicting paths, and labels it `sync-conflict`.
+
+`.gitattributes` marks `.github/workflows/**` and `.github/actions/**` as `merge=ours`, and the
+sync job restores both trees from `vrt` after the merge (dropping files upstream added). That
+keeps our `vrt-*` workflows and upstream's disabled files byte-identical across a sync, so the
+push never needs `workflows` permission and a sync PR never shows workflow churn. A local merge
+of upstream must configure the driver first, or git refuses to merge those paths:
+
+```bash
+git config merge.ours.driver true
+```
 
 A conflict PR is resolved by a human (web editor or locally, see the PR body). The sync job
 never commits conflict markers and never force-pushes `vrt`.
@@ -60,7 +72,8 @@ Keep our delta small and modular so sync conflicts stay rare:
   `io/io-context.c++`, and the lease-awaiting client wrapper in `io/worker-interface.{h,c++}`. The
   other three dimensions stay entirely in `vrt-limits`. Keep this surface as small as possible;
 - avoid editing upstream's `.github/workflows/*` — configure the fork through the API instead
-  (see "Disabled upstream automation").
+  (see "Disabled upstream automation"). `.gitattributes` keeps that tree ours during a sync, so
+  the rules above only matter for local commits on `vrt`.
 
 After a sync merges, rebuild and re-tag; see below.
 
@@ -136,9 +149,11 @@ gh workflow disable <name-or-id> --repo becoolme/workerd
 
 ## Workflow permissions
 
-Bots need `contents: write` (mirror branch, sync branches, releases),
-`pull-requests: write` (sync PRs) and `actions: write` (dispatch the build). The repository
-setting "Allow GitHub Actions to create and approve pull requests" must stay enabled.
+Bots need `contents: write` (sync branches, releases), `pull-requests: write` (sync PRs) and
+`actions: write` (dispatch the build). The repository setting "Allow GitHub Actions to create and
+approve pull requests" must stay enabled. They deliberately do not need `workflows`: the sync
+keeps `.github/workflows/**` and `.github/actions/**` identical to `vrt`, which is the only reason
+a `GITHUB_TOKEN` push is accepted at all.
 
 ## Patches on top of upstream (keep this list current)
 
