@@ -1277,8 +1277,10 @@ struct Worker {
     memoryMb @22 :UInt32;
     # V8 JavaScript heap budget for the Worker's isolate, in MiB. Exhausting it terminates the
     # running invocation instead of aborting the process. This approximates Cloudflare's isolate
-    # memory limit: it covers the JavaScript heap, not native allocations or ArrayBuffer backing
-    # stores.
+    # memory limit: it covers the JavaScript heap plus V8's external memory (ArrayBuffer and
+    # WebAssembly backing stores, and the accounting workerd applies to subrequests), which is
+    # checked at each JavaScript turn boundary because V8's own heap limit does not cover it.
+    # SQLite (Durable Object storage) and other native allocations are not counted.
 
     subRequests @23 :UInt32;
     # Outbound subrequests per invocation. The (N+1)th subrequest throws `Error: Too many

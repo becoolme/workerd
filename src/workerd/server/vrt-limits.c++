@@ -5,9 +5,12 @@
 #include "vrt-limits.h"
 
 #include <workerd/io/actor-cache.h>
+#include <workerd/io/io-context.h>
 #include <workerd/jsg/exception.h>
 #include <workerd/jsg/setup.h>
 #include <workerd/util/exception.h>
+
+#include <v8-statistics.h>
 
 #include <kj/debug.h>
 #include <kj/thread.h>
@@ -128,6 +131,15 @@ void releaseThreadHandle(uint64_t) {}
 
 uint64_t vrtMemoryLimitBytes(uint32_t memoryMb) {
   return static_cast<uint64_t>(memoryMb) << 20;
+}
+
+bool vrtMemoryBudgetExceeded(uint32_t memoryMb, uint64_t heapBytes, uint64_t externalBytes) {
+  if (memoryMb == 0) return false;
+  auto budget = vrtMemoryLimitBytes(memoryMb);
+  if (heapBytes > budget) return true;
+  // Written so the sum cannot overflow: `budget - heapBytes` is the headroom left for external
+  // memory.
+  return externalBytes > budget - heapBytes;
 }
 
 kj::Exception vrtCpuLimitException() {
@@ -488,7 +500,7 @@ class VrtLimitEnforcer::JsScope final {
   VrtLimitEnforcer& enforcer;
 };
 
-kj::Own<void> VrtLimitEnforcer::enterJs(jsg::Lock&, IoContext&) {
+kj::Own<void> VrtLimitEnforcer::enterJs(jsg::Lock& lock, IoContext& context) {
   throwIfExceeded();
 
   if (jsScopeDepth > 0) {
@@ -506,7 +518,26 @@ kj::Own<void> VrtLimitEnforcer::enterJs(jsg::Lock&, IoContext&) {
   // No JS is running here, so a termination left behind by a turn that ended between watchdog
   // samples can be cancelled safely.
   isolateState->cancelPendingLimitTerminations();
-  if (limits.memoryMb != 0) isolateState->clearHeapLimit();
+
+  if (limits.memoryMb != 0) {
+    // V8's heap constraint and its near-heap-limit callback only see the JavaScript heap; the
+    // isolate's external memory (ArrayBuffer/WebAssembly backing stores, and the adjustment workerd
+    // applies to subrequests) can pass the budget on its own, so account for it here.
+    //
+    // Over the budget, mark the invocation (so the outcome and logs say memory) and abort the
+    // request rather than throwing: `enterJs()` is also entered by the turn that finishes
+    // delivering a response, where an exception would abort the delivery and leave the client
+    // hanging. `IoContext::abort()` is the path the runtime's own hang detection uses, and
+    // `IoContext::onAbort()` rejects with this exception, so the request fails cleanly.
+    v8::HeapStatistics stats;
+    lock.v8Isolate->GetHeapStatistics(&stats);
+    if (vrtMemoryBudgetExceeded(
+            limits.memoryMb, stats.total_heap_size(), stats.external_memory())) {
+      invocation->markMemoryExceeded(false);
+      context.abort(vrtMemoryLimitException());
+    }
+    isolateState->clearHeapLimit();
+  }
   isolateState->setCurrentInvocation(*invocation);
   jsScopeDepth = 1;
 
