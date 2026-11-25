@@ -232,6 +232,37 @@ KJ_TEST("AlarmScheduler restores the persisted actor_name onto the ActorKey when
   KJ_EXPECT(KJ_ASSERT_NONNULL(observedName) == "my-name"_kj);
 }
 
+KJ_TEST("AlarmScheduler fires an already-overdue alarm loaded by a fresh scheduler") {
+  kj::EventLoop loop;
+  kj::WaitScope waitScope(loop);
+  AdjustableClock clock;
+  kj::TimerImpl timer(kj::origin<kj::TimePoint>());
+
+  auto dir = kj::newInMemoryDirectory(kj::nullClock());
+  SqliteDatabase::Vfs vfs(*dir);
+  kj::Path path({"alarms"});
+
+  kj::Date scheduledTime = kj::UNIX_EPOCH + 1 * kj::HOURS;
+  {
+    AlarmScheduler scheduler(clock, timer, vfs, path.clone(), failingGetActor());
+    scheduler.setAlarm(ActorKey("overdue-actor"_kj, kj::none), scheduledTime);
+  }
+
+  // The wall clock is already past the persisted deadline when a new process
+  // constructs its scheduler.
+  clock.setTime(scheduledTime + 1 * kj::SECONDS);
+  bool fired = false;
+  auto getActor = [&](const ActorKey&) -> kj::Own<WorkerInterface> {
+    return kj::heap<AlarmStubWorkerInterface>([&fired]() { fired = true; });
+  };
+  AlarmScheduler scheduler(clock, timer, vfs, path.clone(), kj::mv(getActor));
+
+  for (uint i = 0; i < 100 && !fired; i++) {
+    waitScope.poll();
+  }
+  KJ_EXPECT(fired);
+}
+
 KJ_TEST("AlarmScheduler abandons an alarm when ctx.abort() sets retryAlarm to false") {
   kj::EventLoop loop;
   kj::WaitScope waitScope(loop);

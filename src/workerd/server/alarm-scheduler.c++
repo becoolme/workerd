@@ -173,7 +173,12 @@ bool AlarmScheduler::deleteAlarm(const ActorKey& actor) {
 
 AlarmScheduler::ScheduledAlarm AlarmScheduler::scheduleAlarm(
     kj::Date now, const ActorKey& actor, kj::Date scheduledTime) {
-  auto task = makeAlarmTask(scheduledTime - now, actor, scheduledTime);
+  // A persisted alarm can already be due when a fresh scheduler loads it
+  // (process restart / scale-to-zero wake). Never pass a negative delay to
+  // the timer: fire immediately and let checkTimestamp() confirm the wall
+  // clock before running the handler.
+  auto delay = scheduledTime > now ? scheduledTime - now : 0 * kj::NANOSECONDS;
+  auto task = makeAlarmTask(delay, actor, scheduledTime);
   return ScheduledAlarm{actor.clone(), scheduledTime, kj::mv(task)};
 }
 
